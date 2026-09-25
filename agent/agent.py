@@ -1,13 +1,14 @@
 """SMSync agent: watches the EC20 for incoming SMS and uploads them to the server.
 
-Run:  python agent.py
-Conf: config.ini next to this file (falls back to config.example.ini).
+Run:  python agent.py   (打包后：smsync-agent.exe)
+Conf: config.ini next to this file / the exe (falls back to config.example.ini).
 Only third-party dependency: pyserial.
 """
 
 import configparser
 import json
 import logging
+import os
 import sys
 import time
 import urllib.request
@@ -19,25 +20,39 @@ import serial
 from modem import Modem
 from outbox import Outbox
 
-BASE_DIR = Path(__file__).resolve().parent
+__version__ = "1.0.0"
+
+if getattr(sys, "frozen", False):
+    # PyInstaller 打包后：config.ini 放在 exe 旁边，数据放 %APPDATA%（Program Files 不可写）
+    BASE_DIR = Path(sys.executable).resolve().parent
+    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
+    DATA_DIR = Path(os.environ.get("APPDATA", str(BASE_DIR))) / "SMSyncAgent"
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+    BUNDLE_DIR = BASE_DIR
+    DATA_DIR = BASE_DIR
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(DATA_DIR / "agent.log", encoding="utf-8"),
+    ],
 )
 log = logging.getLogger("smsync.agent")
 
 
 def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
-    for name in ("config.ini", "config.example.ini"):
-        path = BASE_DIR / name
+    for path in (BASE_DIR / "config.ini", BUNDLE_DIR / "config.example.ini"):
         if path.exists():
             cfg.read(path, encoding="utf-8")
-            if name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your token!)", name)
+            if path.name == "config.example.ini":
+                log.warning("config.ini not found, using %s (copy it and set your token!)", path)
             return cfg
-    sys.exit("no config.ini / config.example.ini found in agent/")
+    sys.exit("no config.ini / config.example.ini found")
 
 
 class Uploader:
@@ -70,7 +85,11 @@ class Agent:
             cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
             cfg.get("server", "token", fallback=""),
         )
-        self.outbox = Outbox(str(BASE_DIR / cfg.get("agent", "outbox_db", fallback="outbox.db")))
+        outbox_name = cfg.get("agent", "outbox_db", fallback="outbox.db")
+        outbox_path = Path(outbox_name)
+        if not outbox_path.is_absolute():
+            outbox_path = DATA_DIR / outbox_name
+        self.outbox = Outbox(str(outbox_path))
         self.heartbeat_sec = cfg.getint("agent", "heartbeat_sec", fallback=30)
         self.flush_sec = cfg.getint("agent", "flush_sec", fallback=10)
         self._last_heartbeat = 0.0
@@ -186,6 +205,7 @@ class Agent:
 
 def main():
     cfg = load_config()
+    log.info("smsync-agent v%s starting (data dir: %s)", __version__, DATA_DIR)
     try:
         Agent(cfg).run()
     except KeyboardInterrupt:

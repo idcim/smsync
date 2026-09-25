@@ -22,6 +22,10 @@ node_modules/
 client_electron/dist/
 client_electron/release/
 
+# ---- pyinstaller / 安装包产物 ----
+agent/build/
+agent/dist/
+
 # ---- os / editor ----
 Thumbs.db
 Desktop.ini

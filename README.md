@@ -66,6 +66,19 @@ python agent.py
 
 插入 SIM 卡后自动进入监听；新短信实时上传，断网时本地暂存、恢复后自动补传。
 
+#### 打包成 Windows 安装包（免 Python 环境分发）
+
+```bash
+agent/build_installer.sh   # Git Bash 运行，输出 agent/dist/SMSyncAgent-Setup-<版本号>.exe
+```
+
+先用 PyInstaller 打成单文件 `smsync-agent.exe`，再用 NSIS 生成安装包（makensis 默认取 electron-builder 缓存里的，也可用 `MAKENSIS` 环境变量指定）。安装包特性：
+
+- 自定义安装目录、开始菜单快捷方式、控制面板"卸载程序"入口
+- 可选组件"开机自动启动"（写注册表 Run 项，卸载时清除）
+- 首次安装自动放置 `config.ini` 模板，**重装保留已有配置**；卸载保留 `config.ini` 和 `%APPDATA%\SMSyncAgent`（本地队列 `outbox.db` 与日志 `agent.log`）
+- 版本号在 `agent/agent.py` 的 `__version__` 和 `agent/installer.nsi` 的 `APP_VERSION`，两处需同步
+
 ### 3. Electron 客户端
 
 ```bash
