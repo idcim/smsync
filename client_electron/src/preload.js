@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("smsync", {
   openMain: () => ipcRenderer.send("open-main"),
   dismiss: () => ipcRenderer.send("popup-dismiss"),
   onSms: (cb) => ipcRenderer.on("sms", (_e, payload) => cb(payload)),
+  onDeleted: (cb) => ipcRenderer.on("sms-deleted", (_e, payload) => cb(payload)),
   onStatus: (cb) => ipcRenderer.on("status", (_e, status) => cb(status)),
   getConfig: () => ipcRenderer.invoke("get-config"),
   getSettings: () => ipcRenderer.invoke("get-settings"),

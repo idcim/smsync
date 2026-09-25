@@ -110,7 +110,8 @@ docker compose up -d
 | POST | `/api/v1/sms` | 上报短信 `{sender, text, received_at?, client_msg_id?}`；`client_msg_id` 幂等去重 |
 | GET | `/api/v1/sms?limit=&before_id=` | 分页拉取（倒序） |
 | GET | `/api/v1/sms/{id}` | 单条详情 |
-| WS | `/ws?token=` | 实时推送：`{"type":"sms","data":{...}}` |
+| DELETE | `/api/v1/sms/{id}` | 删除短信，并广播 `{"type":"delete","data":{"id":N}}` 让各客户端实时移除 |
+| WS | `/ws?token=` | 实时推送：新短信 `{"type":"sms",...}`、删除 `{"type":"delete",...}` |
 
 ## 开机自启（Windows，非 Docker 方式）
 

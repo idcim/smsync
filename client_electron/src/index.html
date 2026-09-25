@@ -39,6 +39,7 @@
   .btns button { border: 0; border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer; }
   .code { background: #238636; color: #fff; font-weight: 600; }
   .copy { background: #30363d; color: #e6edf3; }
+  .del { background: #b3382c; color: #fff; }
   .btns button:hover { filter: brightness(1.15); }
   .empty { color: #8b949e; text-align: center; margin-top: 30vh; }
   /* settings modal */
@@ -171,9 +172,32 @@ function select(id) {
     <div class="btns">
       ${code ? `<button class="code" id="dCode">复制验证码 ${esc(code)}</button>` : ''}
       <button class="copy" id="dCopy">复制全文</button>
+      <button class="del" id="dDel">删除</button>
     </div>`;
   if (code) $('dCode').onclick = e => doCopy(e.target, code);
   $('dCopy').onclick = e => doCopy(e.target, it.text || '');
+  $('dDel').onclick = () => deleteSms(it.id);
+}
+async function deleteSms(id) {
+  if (!confirm('确定删除这条短信吗？')) return;
+  try {
+    const r = await fetch(cfg.baseUrl + '/api/v1/sms/' + id, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer ' + cfg.token },
+    });
+    if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
+    removeLocal(id);
+  } catch (e) {
+    toast('删除失败：' + e.message, false);
+  }
+}
+function removeLocal(id) {
+  items = items.filter(x => x.id !== id);
+  if (selectedId === id) {
+    selectedId = null;
+    $('detail').innerHTML = '<div class="empty">选择左侧短信查看内容</div>';
+  }
+  renderList();
 }
 async function loadHistory() {
   try {
@@ -230,6 +254,7 @@ window.smsync.onShowSettings(openSettings);
 window.smsync.onSms(({ sms }) => {
   if (!items.some(x => x.id === sms.id)) { items.unshift(sms); renderList(); }
 });
+window.smsync.onDeleted(({ id }) => removeLocal(id));
 window.smsync.onStatus(async s => {
   $('dot').classList.toggle('on', s.connected);
   $('domain').textContent = s.domain + (s.connected ? '' : '（重连中…）');

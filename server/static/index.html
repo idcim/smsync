@@ -23,6 +23,9 @@
           padding: 12px 14px; margin-bottom: 10px; }
   .card .sender { font-weight: 600; color: #58a6ff; }
   .card .time { float: right; font-size: 12px; color: #8b949e; }
+  .card .del { float: right; margin-left: 10px; border: 0; background: none; color: #8b949e;
+               font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1; }
+  .card .del:hover { color: #f85149; }
   .card .text { margin-top: 6px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
   #setup { max-width: 420px; margin: 15vh auto; background: #161b22; border: 1px solid #30363d;
            border-radius: 12px; padding: 24px; display: none; }
@@ -65,10 +68,22 @@ function fmt(iso) {
 function render(item, prepend) {
   const div = document.createElement('div');
   div.className = 'card';
-  div.innerHTML = `<span class="time">${esc(fmt(item.received_at || item.created_at))}</span>
+  div.dataset.id = item.id;
+  div.innerHTML = `<button class="del" title="删除">×</button><span class="time">${esc(fmt(item.received_at || item.created_at))}</span>
     <div class="sender">${esc(item.sender)}</div>
     <div class="text">${esc(item.text)}</div>`;
+  div.querySelector('.del').onclick = async () => {
+    if (!confirm('确定删除这条短信吗？')) return;
+    const r = await fetch('/api/v1/sms/' + item.id, {
+      method: 'DELETE', headers: { Authorization: 'Bearer ' + token }
+    });
+    if (r.ok || r.status === 404) removeCard(item.id);
+  };
   prepend ? $('list').prepend(div) : $('list').append(div);
+}
+function removeCard(id) {
+  const el = document.querySelector(`.card[data-id="${id}"]`);
+  if (el) el.remove();
 }
 async function api(path) {
   const r = await fetch(path, {headers: {Authorization: 'Bearer ' + token}});
@@ -109,6 +124,7 @@ function connect() {
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'sms') { render(msg.data, true); notify(msg.data); }
+    else if (msg.type === 'delete') { removeCard(msg.data.id); }
   };
   // keepalive through proxies
   setInterval(() => { if (ws && ws.readyState === 1) ws.send('ping'); }, 25000);

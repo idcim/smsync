@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -92,6 +93,14 @@ def get_sms(sms_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="not found")
     return row
+
+
+@app.delete("/api/v1/sms/{sms_id}", dependencies=[Depends(check_token)])
+async def delete_sms(sms_id: int):
+    if not db.delete_sms(sms_id):
+        raise HTTPException(status_code=404, detail="not found")
+    await hub.broadcast(json.dumps({"type": "delete", "data": {"id": sms_id}}))
+    return {"deleted": sms_id}
 
 
 @app.websocket("/ws")

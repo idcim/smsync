@@ -74,6 +74,12 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def delete_sms(self, sms_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM sms WHERE id = ?", (sms_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
 
 def to_event(row: dict) -> str:
     return json.dumps({"type": "sms", "data": row}, ensure_ascii=False)

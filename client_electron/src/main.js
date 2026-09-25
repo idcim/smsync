@@ -184,6 +184,8 @@ function connect() {
         showNext();
       }
       if (mainWindow) mainWindow.webContents.send("sms", { sms: msg.data });
+    } else if (msg.type === "delete") {
+      if (mainWindow) mainWindow.webContents.send("sms-deleted", { id: msg.data.id });
     }
   });
   const onLost = () => {
