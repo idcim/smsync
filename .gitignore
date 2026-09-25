@@ -8,6 +8,7 @@ client_pc/config.ini
 # ---- data / runtime ----
 server/smsync.db
 agent/outbox.db
+.last_deployed
 *.db-journal
 *.db-wal
 *.db-shm
