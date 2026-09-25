@@ -1,6 +1,9 @@
 services:
   smsync:
-    build: ./server
+    build:
+      context: ./server
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: smsync-server
     restart: always
     ports:
