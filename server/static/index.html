@@ -82,6 +82,11 @@
   <p style="color:#8b949e;font-size:13px">使用管理员在 <a href="/admin/" style="color:#58a6ff">管理后台</a> 注册的账号登录</p>
   <input id="userInput" placeholder="用户名" autocomplete="username">
   <input id="passInput" type="password" placeholder="密码" autocomplete="current-password">
+  <div style="display:flex;gap:8px;align-items:center">
+    <input id="capInput" placeholder="验证码" maxlength="4" style="flex:1;margin:0 0 10px" autocomplete="off">
+    <img id="capImg" alt="点击刷新验证码" title="点击刷新"
+         style="height:40px;border-radius:6px;cursor:pointer;margin-bottom:10px;background:#0d1117">
+  </div>
   <p id="loginErr" style="color:#f85149;font-size:13px;display:none;margin:0 0 10px"></p>
   <button id="saveBtn" style="width:100%">登录</button>
 </div>
@@ -311,17 +316,31 @@ function start() {
   loadHistory().catch(console.error);
   connect();
 }
+let captchaId = '';
+async function loadCaptcha() {
+  try {
+    const d = await (await fetch('/api/v1/auth/captcha')).json();
+    captchaId = d.captcha_id;
+    $('capImg').src = d.image;
+    $('capInput').value = '';
+  } catch (e) { /* 网络问题，登录时会再提示 */ }
+}
+$('capImg').onclick = loadCaptcha;
+
 $('saveBtn').onclick = async () => {
-  const u = $('userInput').value.trim(), p = $('passInput').value;
-  if (!u || !p) return;
+  const u = $('userInput').value.trim(), p = $('passInput').value, cap = $('capInput').value.trim();
+  if (!u || !p || !cap) return;
   $('saveBtn').disabled = true;
   try {
     const r = await fetch('/api/v1/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: u, password: p }),
+      body: JSON.stringify({ username: u, password: p, captcha_id: captchaId, captcha_text: cap }),
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(r.status === 429 ? '失败次数过多，请 1 分钟后再试' : (d.detail || '登录失败'));
+    if (!r.ok) throw new Error(
+      r.status === 429 ? '失败次数过多，请 1 分钟后再试'
+      : r.status === 400 ? '验证码错误或已过期'
+      : (d.detail || '登录失败'));
     token = d.access_token;
     localStorage.setItem('smsync_jwt', token);
     start();
@@ -329,6 +348,7 @@ $('saveBtn').onclick = async () => {
     const el = $('loginErr');
     el.textContent = e.message;
     el.style.display = 'block';
+    loadCaptcha();  // 验证码一次性，无论对错都要换新
   }
   $('saveBtn').disabled = false;
 };
@@ -342,7 +362,7 @@ $('notifyBtn').onclick = async () => {
   $('notifyBtn').textContent = p === 'granted' ? '通知已开启' : '通知被拒绝';
 };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
-if (token) start(); else $('setup').style.display = 'block';
+if (token) start(); else { $('setup').style.display = 'block'; loadCaptcha(); }
 if (Notification.permission === 'granted') $('notifyBtn').textContent = '通知已开启';
 </script>
 </body>

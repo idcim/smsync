@@ -6,11 +6,16 @@ token 有效期由 SMSYNC_JWT_EXPIRE_HOURS 控制（默认 7 天）。
 
 import hashlib
 import hmac
+import io
+import base64
 import os
+import random
 import secrets
+import threading
 import time
 
 import jwt
+from PIL import Image, ImageDraw, ImageFont
 
 from config import DATA_DIR
 
@@ -72,3 +77,57 @@ def make_token(user: dict) -> str:
 def decode_token(token: str) -> dict:
     """校验并返回 payload；无效/过期抛 jwt 异常。"""
     return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
+
+
+# ---- 图形验证码（登录防爆破；一次性，5 分钟过期，内存存储） ----
+
+_CAPTCHA_TTL = 300
+_CAPTCHA_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # 去掉易混淆的 0/O/1/I
+_captchas: dict[str, tuple[str, float]] = {}
+_captchas_lock = threading.Lock()
+
+
+def new_captcha() -> tuple[str, str]:
+    """生成验证码，返回 (captcha_id, data:image/png;base64 URL)。"""
+    code = "".join(random.choice(_CAPTCHA_CHARS) for _ in range(4))
+    captcha_id = secrets.token_urlsafe(12)
+
+    w, h = 132, 44
+    img = Image.new("RGB", (w, h), (13, 17, 23))
+    draw = ImageDraw.Draw(img)
+    # 干扰线
+    for _ in range(4):
+        draw.line(
+            [(random.randint(0, w), random.randint(0, h)) for _ in range(2)],
+            fill=(random.randint(60, 120),) * 3, width=1)
+    # 字符（随机颜色/位置/字号）
+    for i, ch in enumerate(code):
+        font = ImageFont.load_default(size=random.randint(24, 30))
+        color = (random.randint(150, 255), random.randint(150, 255), random.randint(150, 255))
+        draw.text((10 + i * 30, random.randint(4, 12)), ch, font=font, fill=color)
+    # 噪点
+    for _ in range(120):
+        draw.point((random.randint(0, w - 1), random.randint(0, h - 1)),
+                   fill=(random.randint(80, 160),) * 3)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    with _captchas_lock:
+        # 顺手清理过期项
+        now = time.monotonic()
+        for k in [k for k, (_, exp) in _captchas.items() if exp < now]:
+            _captchas.pop(k, None)
+        _captchas[captcha_id] = (code.lower(), now + _CAPTCHA_TTL)
+    return captcha_id, data_url
+
+
+def check_captcha(captcha_id: str, text: str) -> bool:
+    """校验并销毁（一次性）。大小写不敏感。"""
+    with _captchas_lock:
+        item = _captchas.pop(captcha_id or "", None)
+    if not item:
+        return False
+    code, exp = item
+    return exp >= time.monotonic() and (text or "").strip().lower() == code

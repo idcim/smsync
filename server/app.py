@@ -13,7 +13,15 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from auth import EXPIRE_HOURS, decode_token, hash_password, make_token, verify_password
+from auth import (
+    EXPIRE_HOURS,
+    check_captcha,
+    decode_token,
+    hash_password,
+    make_token,
+    new_captcha,
+    verify_password,
+)
 from config import BASE_DIR, DB_PATH, RECORDINGS_DIR
 from db import Database, to_event
 
@@ -65,6 +73,8 @@ class DialIn(BaseModel):
 class LoginIn(BaseModel):
     username: str = Field(max_length=32)
     password: str = Field(min_length=1, max_length=128)
+    captcha_id: str = Field(default="", max_length=64)
+    captcha_text: str = Field(default="", max_length=8)
 
 
 class ChangePasswordIn(BaseModel):
@@ -237,12 +247,12 @@ def health():
 
 # ---- auth & users ----
 
-@app.post("/api/v1/auth/login")
-def login(payload: LoginIn, request: Request):
+def _issue_token(username: str, password: str, request: Request) -> dict:
+    """校验账号密码并签发 JWT；带登录限流。成功/失败都抛/返一致，不区分用户名或密码错。"""
     ip = request.client.host if request.client else "-"
-    key, fails = _login_throttle(payload.username, ip)
-    user = db.get_user_by_username(payload.username)
-    if not user or user["disabled"] or not verify_password(payload.password, user["password_hash"]):
+    key, fails = _login_throttle(username, ip)
+    user = db.get_user_by_username(username)
+    if not user or user["disabled"] or not verify_password(password, user["password_hash"]):
         fails += 1
         _login_fails[key] = (fails, time.monotonic() + 60 if fails >= 5 else 0.0)
         raise HTTPException(status_code=401, detail="wrong username or password")
@@ -253,6 +263,27 @@ def login(payload: LoginIn, request: Request):
         "expires_in": EXPIRE_HOURS * 3600,
         "user": public_user(user),
     }
+
+
+@app.get("/api/v1/auth/captcha")
+def get_captcha():
+    """图形验证码（登录用）。一次性、5 分钟过期。"""
+    captcha_id, img = new_captcha()
+    return {"captcha_id": captcha_id, "image": img}
+
+
+@app.post("/api/v1/auth/login")
+def login(payload: LoginIn, request: Request):
+    """网页/管理后台登录：强制图形验证码。"""
+    if not check_captcha(payload.captcha_id, payload.captcha_text):
+        raise HTTPException(status_code=400, detail="captcha invalid or expired")
+    return _issue_token(payload.username, payload.password, request)
+
+
+@app.post("/api/v1/auth/token")
+def machine_token(payload: LoginIn, request: Request):
+    """机器客户端（agent / 桌面端等无人值守程序）登录：免验证码，仍受限流保护。"""
+    return _issue_token(payload.username, payload.password, request)
 
 
 @app.get("/api/v1/auth/me")

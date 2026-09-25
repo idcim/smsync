@@ -39,7 +39,7 @@ class JwtAuth:
         """429（连续失败被锁定）时等 60 秒再试，不狂刷。"""
         while True:
             req = urllib.request.Request(
-                self.base + "/api/v1/auth/login",
+                self.base + "/api/v1/auth/token",
                 data=json.dumps({"username": self.username, "password": self.password}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST",

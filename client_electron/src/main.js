@@ -220,7 +220,7 @@ function login() {
   if (loginPromise) return loginPromise; // 避免并发重复登录
   loginPromise = (async () => {
     try {
-      const r = await fetch(`${currentBase()}/api/v1/auth/login`, {
+      const r = await fetch(`${currentBase()}/api/v1/auth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: effUsername, password: effPassword }),

@@ -134,7 +134,9 @@ docker compose up -d
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/auth/login` | 登录 `{username, password}` → `{access_token, user}`；连续失败 5 次锁 60 秒 |
+| GET | `/api/v1/auth/captcha` | 图形验证码 `{captcha_id, image}`（一次性、5 分钟过期） |
+| POST | `/api/v1/auth/login` | 网页登录 `{username, password, captcha_id, captcha_text}`，强制验证码；连续失败 5 次锁 60 秒 |
+| POST | `/api/v1/auth/token` | 机器客户端登录 `{username, password}`（agent/Electron 等无人值守程序用，免验证码，同样限流） |
 | GET | `/api/v1/auth/me` | 当前登录用户信息 |
 | POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |
 | GET/POST | `/api/v1/users` | 用户列表 / 注册用户（仅 admin） |
@@ -173,7 +175,7 @@ schtasks /create /tn SMSyncServer /tr "cmd /c cd /d D:\DEV_AI\smsync\server && C
 
 ## 安全设计
 
-- **鉴权**：多用户 + JWT（HS256，密钥在数据目录 `.jwt_secret` 或 `SMSYNC_JWT_SECRET`）。密码 PBKDF2-HMAC-SHA256（10 万次迭代）哈希存储；登录连续失败 5 次锁 60 秒；禁用/删除用户后其 JWT 立即失效。除 `/api/v1/health` 和登录接口外所有 API 与两个 WS 通道都要求有效 JWT；用户管理接口仅 admin
+- **鉴权**：多用户 + JWT（HS256，密钥在数据目录 `.jwt_secret` 或 `SMSYNC_JWT_SECRET`）。密码 PBKDF2-HMAC-SHA256（10 万次迭代）哈希存储；网页登录强制图形验证码（一次性、5 分钟过期）+ 连续失败 5 次锁 60 秒；机器客户端走免验证码的 `/api/v1/auth/token`（同样限流）；禁用/删除用户后其 JWT 立即失效。除 `/api/v1/health` 和登录接口外所有 API 与两个 WS 通道都要求有效 JWT；用户管理接口仅 admin
 - **传输**：JWT 在 HTTP 头与 WS 查询参数里明文传输，**公网部署必须套 HTTPS**（1Panel 反代 + SSL），否则凭据与短信内容会被窃听
 - **AT 指令注入**：拨号/发短信的号码在服务端做白名单校验（仅 `0-9+*#,`，≤20 位），非法输入 422 拒绝，到不了 modem
 - **注入与 XSS**：数据库全部参数化查询；PWA 与 Electron 界面渲染短信/号码统一转义（`esc()` / `textContent`）

@@ -64,7 +64,7 @@ def login(base: str, username: str, password: str) -> str:
     """用用户名密码换 JWT；429（连续失败被锁定）时等 60 秒再试。"""
     while True:
         req = urllib.request.Request(
-            base + "/api/v1/auth/login",
+            base + "/api/v1/auth/token",
             data=json.dumps({"username": username, "password": password}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
