@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: transparent; overflow: hidden; }
+  .card { background: #1c2128; border: 1px solid #3d444d; border-radius: 12px;
+          color: #e6edf3; height: 100vh; display: flex; flex-direction: column;
+          box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+  .top { display: flex; align-items: center; padding: 10px 12px 6px;
+         -webkit-app-region: drag; user-select: none; }
+  .sender { font-weight: 600; color: #58a6ff; font-size: 14px; flex: 1;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { background: #f85149; color: #fff; font-size: 11px; border-radius: 9px;
+           padding: 1px 7px; margin-right: 8px; display: none; }
+  .time { font-size: 11px; color: #8b949e; margin-right: 8px; }
+  .close { -webkit-app-region: no-drag; cursor: pointer; color: #8b949e; font-size: 16px;
+           border: 0; background: none; padding: 0 2px; }
+  .close:hover { color: #e6edf3; }
+  .text { flex: 1; padding: 4px 12px; font-size: 13px; line-height: 1.5; overflow: hidden;
+          display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+          word-break: break-all; cursor: pointer; }
+  .btns { display: flex; gap: 8px; padding: 8px 12px 12px; }
+  button.act { border: 0; border-radius: 6px; padding: 7px 0; font-size: 13px; cursor: pointer; flex: 1; }
+  .code { background: #238636; color: #fff; font-weight: 600; }
+  .copy { background: #30363d; color: #e6edf3; }
+  .view { background: #1f6feb; color: #fff; }
+  button.act:hover { filter: brightness(1.15); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="top">
+    <span class="badge" id="badge"></span>
+    <span class="sender" id="sender">SMSync</span>
+    <span class="time" id="time"></span>
+    <button class="close" id="close">×</button>
+  </div>
+  <div class="text" id="text" title="点击查看全部"></div>
+  <div class="btns">
+    <button class="act code" id="codeBtn" style="display:none"></button>
+    <button class="act copy" id="copyBtn">复制全文</button>
+    <button class="act view" id="viewBtn">查看</button>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+
+function extractCode(text) {
+  let m = text.match(/(?:验证码|校验码|动态口令|动态码|code)[^0-9]{0,12}([0-9]{4,8})(?![0-9])/i);
+  if (m) return m[1];
+  m = text.match(/(?<![0-9])([0-9]{6})(?![0-9])/) || text.match(/(?<![0-9])([0-9]{4})(?![0-9])/);
+  return m ? m[1] : null;
+}
+function fmt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function flash(btn, label) {
+  const old = btn.textContent;
+  btn.textContent = label || '✓ 已复制';
+  setTimeout(() => { btn.textContent = old; window.smsync.dismiss(); }, 900);
+}
+
+let current = null;
+let pendingBtn = null;
+window.smsync.onCopied(() => {
+  if (pendingBtn) { const b = pendingBtn; pendingBtn = null; flash(b); }
+});
+function doCopy(btn, text) { pendingBtn = btn; window.smsync.copy(text); }
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+  } catch (e) { /* audio unavailable */ }
+}
+
+window.smsync.onSms(({ sms, remaining, sound }) => {
+  current = sms;
+  if (sound) beep();
+  $('sender').textContent = sms.sender || '未知号码';
+  $('time').textContent = fmt(sms.received_at || sms.created_at);
+  $('text').textContent = sms.text || '';
+  const code = extractCode(sms.text || '');
+  if (code) {
+    $('codeBtn').style.display = '';
+    $('codeBtn').textContent = '复制验证码 ' + code;
+    $('codeBtn').onclick = () => doCopy($('codeBtn'), code);
+  } else {
+    $('codeBtn').style.display = 'none';
+  }
+  if (remaining > 0) { $('badge').style.display = ''; $('badge').textContent = '+' + remaining; }
+  else $('badge').style.display = 'none';
+});
+$('copyBtn').onclick = () => { if (current) doCopy($('copyBtn'), current.text || ''); };
+$('viewBtn').onclick = () => window.smsync.openMain();
+$('text').onclick = () => window.smsync.openMain();
+$('close').onclick = () => window.smsync.dismiss();
+</script>
+</body>
+</html>

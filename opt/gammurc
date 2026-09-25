@@ -1,0 +1,4 @@
+[gammu]
+port = COM9:
+connection = at
+model = auto

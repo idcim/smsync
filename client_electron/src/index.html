@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SMSync</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: #0d1117;
+         color: #e6edf3; height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+           background: #161b22; border-bottom: 1px solid #30363d; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin-right: 4px; white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; flex: none; }
+  .dot.on { background: #3fb950; }
+  .domain { font-size: 12px; color: #8b949e; white-space: nowrap; }
+  .spacer { flex: 1; }
+  .tb { border: 1px solid #30363d; background: #21262d; color: #e6edf3; border-radius: 6px;
+        padding: 6px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .tb:hover { background: #30363d; }
+  #search { border: 1px solid #30363d; background: #0d1117; color: #e6edf3; border-radius: 6px;
+            padding: 6px 10px; font-size: 13px; width: 180px; outline: none; }
+  #search:focus { border-color: #1f6feb; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #list { width: 340px; border-right: 1px solid #30363d; overflow-y: auto; }
+  .item { padding: 10px 14px; border-bottom: 1px solid #21262d; cursor: pointer; }
+  .item:hover { background: #161b22; }
+  .item.active { background: #1c2a3d; border-left: 3px solid #1f6feb; }
+  .item .s { font-weight: 600; color: #58a6ff; font-size: 13px; }
+  .item .t { font-size: 11px; color: #8b949e; float: right; }
+  .item .p { font-size: 12px; color: #8b949e; margin-top: 3px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+  #detail { flex: 1; padding: 20px; overflow-y: auto; }
+  #detail .sender { font-size: 18px; font-weight: 600; color: #58a6ff; }
+  #detail .time { font-size: 12px; color: #8b949e; margin: 6px 0 14px; }
+  #detail .text { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+                  padding: 16px; line-height: 1.7; white-space: pre-wrap; word-break: break-all;
+                  user-select: text; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; }
+  .btns button { border: 0; border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer; }
+  .code { background: #238636; color: #fff; font-weight: 600; }
+  .copy { background: #30363d; color: #e6edf3; }
+  .btns button:hover { filter: brightness(1.15); }
+  .empty { color: #8b949e; text-align: center; margin-top: 30vh; }
+  /* settings modal */
+  #mask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+          align-items: center; justify-content: center; z-index: 10; }
+  #mask.show { display: flex; }
+  #modal { width: 440px; background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+           padding: 22px; }
+  #modal h2 { font-size: 16px; margin-bottom: 16px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 13px; color: #8b949e; margin-bottom: 5px; }
+  .field input[type=text], .field input[type=password] {
+    width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #30363d;
+    background: #0d1117; color: #e6edf3; font-size: 13px; outline: none; }
+  .field input:focus { border-color: #1f6feb; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px;
+           margin-bottom: 10px; cursor: pointer; user-select: none; }
+  .check input { accent-color: #1f6feb; width: 15px; height: 15px; }
+  .hint { font-size: 11px; color: #6e7681; margin-top: 4px; }
+  .mBtns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .mBtns button { border: 0; border-radius: 6px; padding: 8px 18px; font-size: 13px; cursor: pointer; }
+  .save { background: #1f6feb; color: #fff; }
+  .cancel { background: #30363d; color: #e6edf3; }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+           background: #238636; color: #fff; padding: 8px 18px; border-radius: 6px;
+           font-size: 13px; display: none; z-index: 20; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>SMSync 短信</h1>
+  <span class="domain" id="ver"></span>
+  <span class="domain" id="domain"></span>
+  <span class="spacer"></span>
+  <input id="search" placeholder="搜索号码或内容…">
+  <button class="tb" id="refreshBtn">刷新</button>
+  <button class="tb" id="latestCodeBtn">复制最新验证码</button>
+  <button class="tb" id="testBtn">测试弹窗</button>
+  <button class="tb" id="settingsBtn">⚙ 设置</button>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="detail"><div class="empty">选择左侧短信查看内容</div></div>
+</main>
+
+<div id="mask">
+  <div id="modal">
+    <h2>设置</h2>
+    <div class="field">
+      <label>访问令牌（留空则使用 .env 里的 SMSYNC_TOKEN）</label>
+      <input type="password" id="sToken" placeholder="SMSYNC_TOKEN">
+    </div>
+    <div class="field">
+      <label>服务器域名（逗号分隔，前者优先，留空用默认）</label>
+      <input type="text" id="sDomains" placeholder="smsync.h6.fan, smsync.qisop.com">
+      <div class="hint" id="sEffective"></div>
+    </div>
+    <label class="check"><input type="checkbox" id="sPopup"> 收到短信时弹出通知窗口</label>
+    <label class="check"><input type="checkbox" id="sSound"> 弹窗提示音</label>
+    <label class="check"><input type="checkbox" id="sAutoStart"> 开机自动启动</label>
+    <div class="mBtns">
+      <button class="cancel" id="sCancel">取消</button>
+      <button class="save" id="sSave">保存并重连</button>
+    </div>
+    <div class="hint" style="text-align:center;margin-top:12px" id="sVersion"></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let cfg = null, items = [], selectedId = null, pendingBtn = null, keyword = '';
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString('zh-CN', { hour12: false });
+}
+function extractCode(text) {
+  let m = text.match(/(?:验证码|校验码|动态口令|动态码|code)[^0-9]{0,12}([0-9]{4,8})(?![0-9])/i);
+  if (m) return m[1];
+  m = text.match(/(?<![0-9])([0-9]{6})(?![0-9])/) || text.match(/(?<![0-9])([0-9]{4})(?![0-9])/);
+  return m ? m[1] : null;
+}
+function toast(msg, ok = true) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.style.background = ok ? '#238636' : '#b3382c';
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.style.display = 'none', 2000);
+}
+window.smsync.onCopied(() => {
+  if (pendingBtn) { const b = pendingBtn; pendingBtn = null; const o = b.textContent;
+    b.textContent = '✓ 已复制'; setTimeout(() => b.textContent = o, 1200); }
+});
+function doCopy(btn, text) { pendingBtn = btn; window.smsync.copy(text); }
+
+function filtered() {
+  if (!keyword) return items;
+  const k = keyword.toLowerCase();
+  return items.filter(it => (it.sender || '').toLowerCase().includes(k)
+    || (it.text || '').toLowerCase().includes(k));
+}
+function renderList() {
+  const data = filtered();
+  $('list').innerHTML = data.map(it => `
+    <div class="item ${it.id === selectedId ? 'active' : ''}" data-id="${it.id}">
+      <span class="t">${esc(fmt(it.received_at || it.created_at))}</span>
+      <div class="s">${esc(it.sender)}</div>
+      <div class="p">${esc(it.text)}</div>
+    </div>`).join('') || '<div class="empty" style="margin-top:40px">没有匹配的短信</div>';
+  document.querySelectorAll('.item').forEach(el =>
+    el.onclick = () => select(Number(el.dataset.id)));
+}
+function select(id) {
+  selectedId = id;
+  const it = items.find(x => x.id === id);
+  renderList();
+  if (!it) return;
+  const code = extractCode(it.text || '');
+  $('detail').innerHTML = `
+    <div class="sender">${esc(it.sender)}</div>
+    <div class="time">${esc(fmt(it.received_at || it.created_at))}</div>
+    <div class="text">${esc(it.text)}</div>
+    <div class="btns">
+      ${code ? `<button class="code" id="dCode">复制验证码 ${esc(code)}</button>` : ''}
+      <button class="copy" id="dCopy">复制全文</button>
+    </div>`;
+  if (code) $('dCode').onclick = e => doCopy(e.target, code);
+  $('dCopy').onclick = e => doCopy(e.target, it.text || '');
+}
+async function loadHistory() {
+  try {
+    const r = await fetch(cfg.baseUrl + '/api/v1/sms?limit=100',
+      { headers: { Authorization: 'Bearer ' + cfg.token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    items = (await r.json()).items;
+    renderList();
+  } catch (e) {
+    $('list').innerHTML = `<div class="empty" style="margin-top:40px">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+// ---- toolbar ----
+$('search').oninput = e => { keyword = e.target.value.trim(); renderList(); };
+$('refreshBtn').onclick = async () => { cfg = await window.smsync.getConfig(); loadHistory(); };
+$('latestCodeBtn').onclick = e => {
+  for (const it of items) {
+    const code = extractCode(it.text || '');
+    if (code) { doCopy(e.target, code); return; }
+  }
+  toast('最近 100 条里没有找到验证码', false);
+};
+$('testBtn').onclick = () => window.smsync.testPopup();
+$('settingsBtn').onclick = openSettings;
+
+// ---- settings ----
+async function openSettings() {
+  const s = await window.smsync.getSettings();
+  $('sToken').value = s.token || '';
+  $('sDomains').value = s.domains || '';
+  $('sEffective').textContent = '当前生效：' + (s.effectiveDomains || '（无）');
+  $('sPopup').checked = !!s.popupEnabled;
+  $('sSound').checked = !!s.soundEnabled;
+  $('sAutoStart').checked = !!s.autoStart;
+  $('mask').classList.add('show');
+}
+$('sCancel').onclick = () => $('mask').classList.remove('show');
+$('mask').onclick = e => { if (e.target === $('mask')) $('mask').classList.remove('show'); };
+$('sSave').onclick = async () => {
+  await window.smsync.saveSettings({
+    token: $('sToken').value.trim(),
+    domains: $('sDomains').value.trim(),
+    popupEnabled: $('sPopup').checked,
+    soundEnabled: $('sSound').checked,
+    autoStart: $('sAutoStart').checked,
+  });
+  $('mask').classList.remove('show');
+  toast('已保存，正在重连…');
+  setTimeout(async () => { cfg = await window.smsync.getConfig(); loadHistory(); }, 800);
+};
+window.smsync.onShowSettings(openSettings);
+
+window.smsync.onSms(({ sms }) => {
+  if (!items.some(x => x.id === sms.id)) { items.unshift(sms); renderList(); }
+});
+window.smsync.onStatus(async s => {
+  $('dot').classList.toggle('on', s.connected);
+  $('domain').textContent = s.domain + (s.connected ? '' : '（重连中…）');
+  if (s.connected) { cfg = await window.smsync.getConfig(); loadHistory(); }
+});
+(async () => {
+  cfg = await window.smsync.getConfig();
+  $('domain').textContent = cfg.domain;
+  $('ver').textContent = 'v' + cfg.version;
+  $('sVersion').textContent = 'SMSync v' + cfg.version;
+  loadHistory();
+})();
+</script>
+</body>
+</html>

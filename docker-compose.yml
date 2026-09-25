@@ -1,0 +1,15 @@
+services:
+  smsync:
+    build: ./server
+    container_name: smsync-server
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      SMSYNC_TOKEN: ${SMSYNC_TOKEN}
+      SMSYNC_DB: /data/smsync.db
+    volumes:
+      - smsync-data:/data
+
+volumes:
+  smsync-data:
