@@ -18,5 +18,13 @@ if [ ! -x "$MAKENSIS" ] && [ ! -f "$MAKENSIS" ]; then
   echo "请安装 NSIS 或设置 MAKENSIS 环境变量指向 makensis.exe"
   exit 1
 fi
+
+# NSIS 3.x 需要 UTF-8 BOM 才能正确处理中文，编辑器改动后可能丢失，构建前自动补上
+python -c "
+data = open('installer.nsi','rb').read()
+if not data.startswith(b'\xef\xbb\xbf'):
+    open('installer.nsi','wb').write(b'\xef\xbb\xbf' + data)
+" 2>/dev/null || true
+
 "$MAKENSIS" installer.nsi
 echo "OK: dist/SMSyncAgent-Setup-*.exe"

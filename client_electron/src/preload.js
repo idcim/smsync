@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("smsync", {
   onStatus: (cb) => ipcRenderer.on("status", (_e, status) => cb(status)),
   getConfig: () => ipcRenderer.invoke("get-config"),
   relogin: () => ipcRenderer.invoke("relogin"),
+  onUpdateAvailable: (cb) => ipcRenderer.on("update-available", (_e, v) => cb(v)),
+  openReleases: () => ipcRenderer.send("open-releases"),
   getSettings: () => ipcRenderer.invoke("get-settings"),
   saveSettings: (patch) => ipcRenderer.invoke("save-settings", patch),
   testPopup: () => ipcRenderer.send("test-popup"),

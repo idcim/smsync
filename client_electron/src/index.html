@@ -107,6 +107,10 @@
            margin-bottom: 10px; cursor: pointer; user-select: none; }
   .check input { accent-color: #1f6feb; width: 15px; height: 15px; }
   .hint { font-size: 11px; color: #6e7681; margin-top: 4px; }
+  .update { display: none; text-align: center; margin-top: 10px; font-size: 13px; color: #d29922; }
+  .update.show { display: block; }
+  .update b { color: #ffa657; }
+  .update a { color: #58a6ff; cursor: pointer; text-decoration: underline; margin-left: 6px; }
   .mBtns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
   .mBtns button { border: 0; border-radius: 6px; padding: 8px 18px; font-size: 13px; cursor: pointer; }
   .save { background: #1f6feb; color: #fff; }
@@ -187,6 +191,7 @@
       <button class="save" id="sSave">保存并重连</button>
     </div>
     <div class="hint" style="text-align:center;margin-top:12px" id="sVersion"></div>
+    <div class="update" id="sUpdate">发现新版本 <b id="sUpdateVer"></b><a id="sUpdateLink">去下载</a></div>
   </div>
 </div>
 <div id="toast"></div>
@@ -194,6 +199,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let cfg = null, items = [], selectedId = null, pendingBtn = null, keyword = '';
+let latestVersion = null; // 检查更新发现的最新版本号
 let calls = [], outbox = [], activeCall = null;
 
 function esc(s) {
@@ -236,6 +242,19 @@ window.smsync.onCopied(() => {
     b.textContent = '✓ 已复制'; setTimeout(() => b.textContent = o, 1200); }
 });
 function doCopy(btn, text) { pendingBtn = btn; window.smsync.copy(text); }
+
+// ---- 更新提示 ----
+function renderUpdateHint() {
+  $('sUpdate').classList.toggle('show', !!latestVersion);
+  if (latestVersion) $('sUpdateVer').textContent = 'v' + latestVersion;
+}
+function setCfg(c) {
+  cfg = c;
+  latestVersion = c.latestVersion || null;
+  renderUpdateHint();
+}
+window.smsync.onUpdateAvailable(v => { latestVersion = v; renderUpdateHint(); });
+$('sUpdateLink').onclick = () => window.smsync.openReleases();
 
 // ---- tabs ----
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
@@ -417,7 +436,7 @@ function onSmsSent(row) {
 // ---- toolbar ----
 $('search').oninput = e => { keyword = e.target.value.trim(); renderList(); };
 $('refreshBtn').onclick = async () => {
-  cfg = await window.smsync.getConfig();
+  setCfg(await window.smsync.getConfig());
   loadHistory(); loadCalls(); loadOutbox();
 };
 $('latestCodeBtn').onclick = e => {
@@ -455,7 +474,7 @@ $('sSave').onclick = async () => {
   });
   $('mask').classList.remove('show');
   toast('已保存，正在重连…');
-  setTimeout(async () => { cfg = await window.smsync.getConfig(); loadHistory(); }, 800);
+  setTimeout(async () => { setCfg(await window.smsync.getConfig()); loadHistory(); }, 800);
 };
 window.smsync.onShowSettings(openSettings);
 
@@ -473,10 +492,10 @@ window.smsync.onAgentStatus(s => {
 window.smsync.onStatus(async s => {
   $('dot').classList.toggle('on', s.connected);
   $('domain').textContent = s.domain + (s.connected ? '' : '（重连中…）');
-  if (s.connected) { cfg = await window.smsync.getConfig(); loadHistory(); loadCalls(); }
+  if (s.connected) { setCfg(await window.smsync.getConfig()); loadHistory(); loadCalls(); }
 });
 (async () => {
-  cfg = await window.smsync.getConfig();
+  setCfg(await window.smsync.getConfig());
   $('domain').textContent = cfg.domain;
   $('ver').textContent = 'v' + cfg.version;
   $('sVersion').textContent = 'SMSync v' + cfg.version;

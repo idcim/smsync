@@ -9,6 +9,7 @@ const {
   ipcMain,
   nativeImage,
   screen,
+  shell,
   Tray,
   Menu,
 } = require("electron");
@@ -65,6 +66,7 @@ let failedAttempts = 0;
 let reconnectTimer = null;
 const queue = [];
 let popupBusy = false;
+let latestVersion = null; // 检查更新发现的最新版本号，null 表示已是最新
 
 const currentBase = () => effServers[serverIndex].http;
 const currentWs = () =>
@@ -268,6 +270,7 @@ async function connect() {
     failedAttempts = 0;
     console.log(`connected: ${currentName()}`);
     broadcastStatus(true);
+    checkUpdate();
   });
   ws.on("message", (raw) => {
     let msg;
@@ -324,6 +327,40 @@ function reconnect() {
   else scheduleReconnect(0);
 }
 
+// ---------------------------------------------------------------- update check
+
+// 简单 semver 比较：a 比 b 新则返回 true（按 . 分段逐段比数字）
+function isNewer(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+// health 接口无需鉴权；服务端版本更新时记下来并通知主窗口
+async function checkUpdate() {
+  try {
+    const r = await fetch(`${currentBase()}/api/v1/health`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.version && isNewer(data.version, app.getVersion())) {
+      if (latestVersion !== data.version) {
+        latestVersion = data.version;
+        console.log(`update available: v${latestVersion}`);
+        if (mainWindow) mainWindow.webContents.send("update-available", latestVersion);
+      }
+    } else {
+      latestVersion = null;
+    }
+  } catch {
+    /* 离线时跳过，等下次检查 */
+  }
+}
+
 // ---------------------------------------------------------------- ipc
 
 ipcMain.handle("copy-text", (event, text) => {
@@ -339,6 +376,7 @@ ipcMain.handle("get-config", async () => {
     token: effToken,
     domain: currentName(),
     version: app.getVersion(),
+    latestVersion, // 有更新时为最新版本号，否则 null
   };
 });
 
@@ -346,6 +384,10 @@ ipcMain.handle("get-config", async () => {
 ipcMain.handle("relogin", async () => {
   effToken = null;
   return (await login()) ? effToken : null;
+});
+
+ipcMain.on("open-releases", () => {
+  shell.openExternal("https://github.com/idcim/smsync/releases");
 });
 
 ipcMain.handle("get-settings", () => ({
@@ -418,6 +460,7 @@ if (!gotLock) {
     );
     tray.on("click", () => openMainWindow());
     connect();
+    setInterval(checkUpdate, 6 * 60 * 60 * 1000); // 之后每 6 小时检查一次更新
     if (process.argv.includes("--show")) openMainWindow();
   });
   app.on("window-all-closed", () => {

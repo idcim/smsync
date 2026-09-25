@@ -21,7 +21,7 @@ import serial
 from modem import Modem
 from outbox import Outbox
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后：config.ini 放在 exe 旁边，数据放 %APPDATA%（Program Files 不可写）

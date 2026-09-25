@@ -185,6 +185,12 @@ schtasks /create /tn SMSyncServer /tr "cmd /c cd /d D:\DEV_AI\smsync\server && C
 - **Electron**：渲染进程 `sandbox + contextIsolation + 禁用 nodeIntegration`，只经 contextBridge 暴露少量 IPC；禁止新开窗口与页面导航
 - **响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
 
+## 版本与发版
+
+- 版本号位置：服务端 `server/config.py` 的 `APP_VERSION`（`/api/v1/health` 对外暴露，无需鉴权）；Electron 客户端 `client_electron/package.json`；采集端 `agent/agent.py` 的 `__version__` + `agent/installer.nsi` 的 `APP_VERSION`
+- Electron 客户端会自动检查更新：连上服务器后及每 6 小时比对 health 接口版本，发现新版本在设置面板提示并可直接跳转到 [GitHub Releases](https://github.com/idcim/smsync/releases) 下载
+- 发版流程：改版本号 → 提交推送 → `git tag v<X.Y.Z> && git push origin v<X.Y.Z>` → `gh release create v<X.Y.Z> <安装包文件>`（安装包：`client_electron/dist/` 和 `agent/dist/` 下的 Setup exe）
+
 ## 已知限制
 
 - 超长拼接短信会按段分别上报（未做 UDH 重组）

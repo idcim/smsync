@@ -22,10 +22,10 @@ from auth import (
     new_captcha,
     verify_password,
 )
-from config import BASE_DIR, DB_PATH, RECORDINGS_DIR
+from config import APP_VERSION, BASE_DIR, DB_PATH, RECORDINGS_DIR
 from db import Database, to_event
 
-app = FastAPI(title="SMSync", version="2.0")
+app = FastAPI(title="SMSync", version=APP_VERSION)
 # 所有页面与 API 同源（PWA/管理后台由本服务托管），无需放开 CORS；浏览器跨域默认拒绝
 db = Database(DB_PATH)
 
@@ -242,7 +242,8 @@ agent_channel = AgentChannel()
 
 @app.get("/api/v1/health")
 def health():
-    return {"ok": True}
+    # version 无需鉴权：客户端用它做更新检查
+    return {"ok": True, "version": APP_VERSION}
 
 
 # ---- auth & users ----

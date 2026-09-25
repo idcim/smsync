@@ -83,7 +83,7 @@ cd /opt/smsync && ./deploy.sh
 - 上报类接口保持幂等：客户端生成 `client_msg_id`，服务端据此去重/upsert
 - 任何导致数据变化的接口（新短信、删除、通话事件、发送结果）必须向 `/ws` 广播对应消息，让客户端实时同步
 - WS 消息类型：`sms` / `delete` / `call` / `sms_sent` / `agent`
-- Electron 版本号在 `client_electron/package.json` 的 `version` 字段，主窗口标题栏和设置面板会显示
+- 版本号三处：服务端 `server/config.py` 的 `APP_VERSION`（health 接口暴露）、Electron `client_electron/package.json`（标题栏/设置页显示，客户端据此比对 health 版本提示更新）、采集端 `agent/agent.py` 的 `__version__` + `agent/installer.nsi` 的 `APP_VERSION`（两处同步）
 
 ## API 速览
 
