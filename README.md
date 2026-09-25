@@ -96,7 +96,7 @@ cp .env.example .env    # 填入正式 SMSYNC_TOKEN
 docker compose up -d
 ```
 
-- **定时拉取部署**：1Panel → 计划任务 → Shell 脚本，内容 `cd /opt/smsync && ./deploy.sh`，周期自定
+- **定时拉取部署**：1Panel → 计划任务 → Shell 脚本，内容 `cd /opt/smsync && ./deploy.sh`，周期自定。脚本会先 `git fetch` 比对远端：**有新提交才** `git pull` + `docker compose up -d --build`，无更新直接跳过（日志会打印 skip 原因）；本地分支与远端分叉时会报错退出，防止误部署
 - **域名与 HTTPS**：1Panel → 网站 → 反向代理，把 `smsync.h6.fan`、`smsync.qisop.com` 代理到 `127.0.0.1:8000`，申请 SSL 并确认开启 WebSocket 支持
 - 上线后把 `agent/config.ini` 和各客户端的地址改为 `https://smsync.h6.fan`
 
