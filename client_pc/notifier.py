@@ -12,6 +12,8 @@ import logging
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -47,7 +49,7 @@ def load_config() -> configparser.ConfigParser:
         if path.exists():
             cfg.read(path, encoding="utf-8")
             if name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your token!)", name)
+                log.warning("config.ini not found, using %s (copy it and set your username/password!)", name)
             return cfg
     sys.exit("no config.ini / config.example.ini found in client_pc/")
 
@@ -58,12 +60,35 @@ def build_ws_url(base: str, token: str) -> str:
     return urlunsplit((scheme, parts.netloc, parts.path + "/ws", urlencode({"token": token}), ""))
 
 
+def login(base: str, username: str, password: str) -> str:
+    """用用户名密码换 JWT；429（连续失败被锁定）时等 60 秒再试。"""
+    while True:
+        req = urllib.request.Request(
+            base + "/api/v1/auth/login",
+            data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                data = json.loads(resp.read())
+            log.info("已登录为 %s", data.get("user", {}).get("username", username))
+            return data["access_token"]
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                log.warning("登录连续失败被锁定，60 秒后重试")
+                time.sleep(60)
+                continue
+            raise RuntimeError(f"login failed: HTTP {e.code}")
+
+
 def main():
     cfg = load_config()
-    url = build_ws_url(
-        cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
-        cfg.get("server", "token", fallback=""),
-    )
+    base = cfg.get("server", "url", fallback="http://127.0.0.1:8000").rstrip("/")
+    username = cfg.get("server", "username", fallback="")
+    password = cfg.get("server", "password", fallback="")
+    token: str | None = None
+    closed = {"code": None}
 
     def on_message(ws, message):
         try:
@@ -76,7 +101,7 @@ def main():
             notify(sms.get("sender", "unknown"), sms.get("text", ""))
 
     def on_open(ws):
-        log.info("connected to %s", url.split("?")[0])
+        log.info("connected to %s", base + "/ws")
         threading.Thread(
             target=lambda: [ws.send("ping") or time.sleep(25) for _ in iter(int, 1)],
             daemon=True,
@@ -84,15 +109,29 @@ def main():
 
     def on_close(ws, code, msg):
         log.warning("disconnected (code=%s)", code)
+        closed["code"] = code
 
     while True:
+        if token is None:
+            try:
+                token = login(base, username, password)
+            except Exception as e:
+                # 登录失败（如密码错误、服务器不可达）：稍后重试
+                log.error("登录失败（%s），30 秒后重试", e)
+                time.sleep(30)
+                continue
+        closed["code"] = None
         WebSocketApp(
-            url,
+            build_ws_url(base, token),
             on_open=on_open,
             on_message=on_message,
             on_close=on_close,
             on_error=lambda ws, e: log.warning("ws error: %s", e),
         ).run_forever(ping_interval=0)
+        if closed["code"] == 4401:
+            # JWT 无效/过期：丢弃旧令牌，下一轮重新登录
+            log.info("JWT 已失效，重新登录")
+            token = None
         log.info("reconnecting in 5s...")
         time.sleep(5)
 

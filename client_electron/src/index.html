@@ -167,8 +167,12 @@
   <div id="modal">
     <h2>设置</h2>
     <div class="field">
-      <label>访问令牌（留空则使用 .env 里的 SMSYNC_TOKEN）</label>
-      <input type="password" id="sToken" placeholder="SMSYNC_TOKEN">
+      <label>用户名（留空则使用 .env 里的 SMSYNC_USERNAME）</label>
+      <input type="text" id="sUsername" placeholder="SMSYNC_USERNAME" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>密码（留空则使用 .env 里的 SMSYNC_PASSWORD）</label>
+      <input type="password" id="sPassword" placeholder="SMSYNC_PASSWORD">
     </div>
     <div class="field">
       <label>服务器域名（逗号分隔，前者优先，留空用默认）</label>
@@ -214,10 +218,15 @@ function toast(msg, ok = true) {
   clearTimeout(t._h);
   t._h = setTimeout(() => t.style.display = 'none', 2000);
 }
-async function api(path, method = 'GET', body = null) {
+async function api(path, method = 'GET', body = null, retried = false) {
   const opt = { method, headers: { Authorization: 'Bearer ' + cfg.token } };
   if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(cfg.baseUrl + path, opt);
+  if (r.status === 401 && !retried) {
+    // JWT 过期：让主进程重新登录换新令牌，再重试一次
+    const t = await window.smsync.relogin();
+    if (t) { cfg.token = t; return api(path, method, body, true); }
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
   return data;
@@ -424,7 +433,8 @@ $('settingsBtn').onclick = openSettings;
 // ---- settings ----
 async function openSettings() {
   const s = await window.smsync.getSettings();
-  $('sToken').value = s.token || '';
+  $('sUsername').value = s.username || '';
+  $('sPassword').value = s.password || '';
   $('sDomains').value = s.domains || '';
   $('sEffective').textContent = '当前生效：' + (s.effectiveDomains || '（无）');
   $('sPopup').checked = !!s.popupEnabled;
@@ -436,7 +446,8 @@ $('sCancel').onclick = () => $('mask').classList.remove('show');
 $('mask').onclick = e => { if (e.target === $('mask')) $('mask').classList.remove('show'); };
 $('sSave').onclick = async () => {
   await window.smsync.saveSettings({
-    token: $('sToken').value.trim(),
+    username: $('sUsername').value.trim(),
+    password: $('sPassword').value,
     domains: $('sDomains').value.trim(),
     popupEnabled: $('sPopup').checked,
     soundEnabled: $('sSound').checked,

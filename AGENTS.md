@@ -23,7 +23,8 @@ EC20 模块 ──串口──▶ agent/ 或 agent_rpi/ ──HTTPS POST──�
 
 | 目录 | 职责 | 入口 | 技术栈 |
 |------|------|------|--------|
-| `server/` | REST API + SQLite + WS 推送 + PWA 托管 | `app:app`（uvicorn，端口 8000） | FastAPI, Pydantic |
+| `server/` | REST API + SQLite + WS 推送 + PWA/管理后台托管 | `app:app`（uvicorn，端口 8000） | FastAPI, Pydantic, PyJWT |
+| `admin/` | 管理后台前端（用户管理），构建产物在 `server/static/admin/` | `npm run build` | Vue 3, Element Plus, Vite |
 | `agent/` | Windows 采集端（插 EC20 的电脑） | `agent.py` | pyserial, websocket-client |
 | `agent_rpi/` | 树莓派采集端：短信 + 语音通话 + 录音 | `agent.py` | pyserial, websocket-client, ALSA |
 | `client_electron/` | 桌面客户端：弹窗 + 验证码复制 + 主窗口 | `src/main.js` | Electron 37, ws |
@@ -36,7 +37,7 @@ EC20 模块 ──串口──▶ agent/ 或 agent_rpi/ ──HTTPS POST──�
 - `agent_rpi/voice.py`：通话状态机（RING/CLIP/CLCC 驱动）
 - `agent_rpi/audio.py`：通话录音（arecord/ALSA，WAV）
 - `agent_rpi/uplink.py`：WS 下行指令通道（拨号/接听/挂断/发短信）
-- `server/app.py`：全部路由 + WS 管理；`server/db.py`：存储层；`server/config.py`：token/路径
+- `server/app.py`：全部路由 + WS 管理；`server/db.py`：存储层；`server/config.py`：路径配置；`server/auth.py`：PBKDF2 密码哈希 + JWT 签发/校验
 
 ## 常用命令
 
@@ -60,15 +61,19 @@ npm run dist           # 打包 NSIS 安装包到 dist/
 # Docker 部署（服务器）
 docker compose up -d
 
+# 管理后台前端（改动 admin/ 后重新构建，产物直接进 server/static/admin/ 并提交）
+cd admin && npm install && npm run build
+
 # 定时增量部署（1Panel 计划任务调用）
 cd /opt/smsync && ./deploy.sh
 ```
 
 ## 配置与密钥规则
 
-- 访问令牌三处必须一致：`server/.token`（或环境变量 `SMSYNC_TOKEN`）= `agent/config.ini` 的 `token` = 各客户端设置里的 token
-- 所有 HTTP 接口需请求头 `Authorization: Bearer <SMSYNC_TOKEN>`；WS 用 `?token=` 查询参数
-- 以下文件已 gitignore，**绝不提交**：`.env`、`client_electron/.env`、`server/.token`、`agent/config.ini`、`client_pc/config.ini`、`*.db`
+- 认证为多用户 + JWT：客户端/采集端用管理后台注册的账号密码调 `/api/v1/auth/login` 换 JWT（默认 7 天），遇 401/WS 4401 自动重新登录
+- 所有 HTTP 接口（除 health/login）需 `Authorization: Bearer <JWT>`；WS 用 `?token=<JWT>` 查询参数
+- JWT 密钥：环境变量 `SMSYNC_JWT_SECRET` 或数据目录 `.jwt_secret`（首次自动生成）；admin 初始密码：`SMSYNC_ADMIN_PASSWORD` 或数据目录 `.admin_credentials`
+- 以下文件已 gitignore，**绝不提交**：`.env`、`client_electron/.env`、`server/.token`、`server/.jwt_secret`、`server/.admin_credentials`、`agent/config.ini`、`client_pc/config.ini`、`*.db`
 - 修改配置结构时，只改 `*.example` 模板文件（`config.example.ini`、`.env.example`），并在 README 说明
 
 ## 代码约定
@@ -84,6 +89,8 @@ cd /opt/smsync && ./deploy.sh
 
 完整 API 表见 `README.md`。核心端点：
 
+- `POST /api/v1/auth/login`、`/api/v1/auth/me`、`/api/v1/auth/change_password`
+- `GET/POST /api/v1/users`、`PATCH/DELETE /api/v1/users/{id}`（仅 admin）
 - `POST /api/v1/sms`、`GET /api/v1/sms`、`DELETE /api/v1/sms/{id}`
 - `POST /api/v1/sms/send`、`GET /api/v1/sms/outbox/list`
 - `POST /api/v1/calls`、`GET /api/v1/calls`、`/api/v1/calls/dial|answer|hangup`
@@ -92,8 +99,8 @@ cd /opt/smsync && ./deploy.sh
 
 ## 禁区与注意事项
 
-- 不要把 token、`.env`、`config.ini`、数据库文件写进代码或提交
-- 不要削弱安全控制：token 常数时间比较、号码白名单校验（防 AT 注入）、容器非 root + 只读 rootfs、Electron sandbox——任何改动都要保留等效防护，详见 `README.md` 的"安全设计"一节
+- 不要把账号密码、JWT 密钥、`.env`、`config.ini`、数据库文件写进代码或提交
+- 不要削弱安全控制：密码 PBKDF2 哈希、登录限流、JWT 校验、号码白名单校验（防 AT 注入）、容器非 root + 只读 rootfs、Electron sandbox——任何改动都要保留等效防护，详见 `README.md` 的"安全设计"一节
 - `deploy.sh` 在本地分支与远端分叉时报错退出（防误部署），**不要为它加强推/reset 逻辑**
 - 改 `agent_rpi/` 的音频/通话相关代码前，先读 `agent_rpi/setup.md` 了解硬件接线（EC20 PCM ↔ 树莓派 I2S）和 VoLTE 前提
 - 已知限制：超长拼接短信未做 UDH 重组（按段分别上报）；网页端通知需页面保持打开

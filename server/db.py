@@ -39,7 +39,18 @@ CREATE TABLE IF NOT EXISTS sms_outbox (
     created_at TEXT NOT NULL,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
+
+_USER_FIELDS = ("password_hash", "role", "disabled")
 
 _CALL_FIELDS = ("direction", "number", "status", "started_at",
                 "answered_at", "ended_at", "duration", "recording_file")
@@ -196,6 +207,73 @@ class Database:
                 "SELECT * FROM sms_outbox ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ---- users ----
+
+    def count_users(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    def count_admins(self) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0"
+            ).fetchone()[0]
+
+    def create_user(self, username: str, password_hash: str, role: str = "user") -> dict:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO users (username, password_hash, role, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (username, password_hash, role, now),
+            )
+            self._conn.commit()
+            return dict(self._conn.execute(
+                "SELECT * FROM users WHERE id = ?", (cur.lastrowid,)
+            ).fetchone())
+
+    def get_user(self, user_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_users(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, username, role, disabled, created_at FROM users ORDER BY id"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_user(self, user_id: int, **fields) -> Optional[dict]:
+        sets = {k: v for k, v in fields.items() if k in _USER_FIELDS and v is not None}
+        with self._lock:
+            if sets:
+                cols = ", ".join(f"{k} = ?" for k in sets)
+                self._conn.execute(
+                    f"UPDATE users SET {cols} WHERE id = ?", (*sets.values(), user_id)
+                )
+                self._conn.commit()
+            row = self._conn.execute(
+                "SELECT id, username, role, disabled, created_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_user(self, user_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
 
 
 def to_event(row: dict) -> str:

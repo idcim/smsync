@@ -6,9 +6,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      SMSYNC_TOKEN: ${SMSYNC_TOKEN}
       SMSYNC_DB: /data/smsync.db
       PYTHONDONTWRITEBYTECODE: "1"
+      # 可选：首次启动的 admin 初始密码；不设置则随机生成并写入数据卷 /data/.admin_credentials
+      SMSYNC_ADMIN_PASSWORD: ${SMSYNC_ADMIN_PASSWORD:-}
+      # 可选：固定 JWT 密钥；不设置则自动生成并保存在数据卷 /data/.jwt_secret
+      SMSYNC_JWT_SECRET: ${SMSYNC_JWT_SECRET:-}
     volumes:
       - smsync-data:/data
     # 安全收紧：容器以非 root 运行（见 Dockerfile），根文件系统只读，无特权

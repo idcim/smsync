@@ -22,12 +22,14 @@ EC20 (COM9)                       服务器 (Docker)                        客�
 │   ├── agent.py        #   主程序：监听新短信 → 上传，断线自动重连
 │   ├── modem.py        #   EC20 AT 指令层（文本模式 + UCS2 中文解码）
 │   ├── outbox.py       #   本地 SQLite 队列：断网暂存、恢复后重传
-│   └── config.ini      #   串口、服务器地址、token
+│   └── config.ini      #   串口、服务器地址、登录账号
+├── admin/              # 管理后台前端（Vue 3 + Element Plus，Vite 构建）
+│   └── （npm run build 输出到 server/static/admin/）
 ├── server/             # 服务器：FastAPI + SQLite + WebSocket + 网页客户端
-│   ├── app.py          #   REST API + WS 推送 + PWA 托管
-│   ├── static/         #   网页客户端（手机/PC 通用）
-│   ├── Dockerfile
-│   └── .token          #   本地运行时自动生成的访问令牌
+│   ├── app.py          #   REST API + WS 推送 + PWA/管理后台托管
+│   ├── auth.py         #   用户认证：PBKDF2 密码哈希 + JWT 签发/校验
+│   ├── static/         #   网页客户端（手机/PC 通用）+ admin/ 管理后台产物
+│   └── Dockerfile
 ├── agent_rpi/          # 树莓派采集端：SMS 收发 + 语音通话控制 + 通话录音
 │   ├── agent.py        #   主程序（短信/来电监听/指令执行/断网队列）
 │   ├── voice.py        #   通话状态机（RING/CLIP/CLCC 驱动）
@@ -52,7 +54,14 @@ pip install -r requirements.txt
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-首次启动自动生成访问令牌，保存在 `server/.token`（也可用环境变量 `SMSYNC_TOKEN` 指定）。
+首次启动自动创建管理员账号 `admin`：密码优先取环境变量 `SMSYNC_ADMIN_PASSWORD`，否则随机生成并写入**数据目录**下的 `.admin_credentials`（本地开发即 `server/.admin_credentials`，Docker 里在数据卷 `/data/.admin_credentials`，用 `docker exec smsync-server cat /data/.admin_credentials` 查看）。
+
+### 管理后台（用户管理）
+
+浏览器打开 `http://服务器地址:8000/admin/`，用 admin 登录后可：注册新用户、重置密码、启用/禁用账号、删除用户、修改自己的密码。所有客户端和采集端都用这里注册的账号登录。
+
+- 后端改造源码在 `admin/`（Vue 3 + Element Plus + Vite），改动后 `cd admin && npm install && npm run build` 重新构建到 `server/static/admin/`
+- 普通用户（role=user）可登录各客户端收发查看，但没有用户管理权限
 
 ### 2. 采集端（插 EC20 的电脑）
 
@@ -60,7 +69,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 cd agent
 pip install -r requirements.txt
 # 编辑 config.ini：modem 端口（设备管理器里 "Quectel USB AT Port"，本机为 COM9）、
-# 服务器 url、token（与 server/.token 一致）
+# 服务器 url、username/password（管理后台注册的账号）
 python agent.py
 ```
 
@@ -84,13 +93,13 @@ agent/build_installer.sh   # Git Bash 运行，输出 agent/dist/SMSyncAgent-Set
 ```bash
 cd client_electron
 npm install
-cp .env.example .env   # 填入 SMSYNC_TOKEN
+cp .env.example .env   # 填入 SMSYNC_USERNAME / SMSYNC_PASSWORD
 npm start              # 常驻系统托盘；npm start -- --show 同时打开主窗口
 ```
 
 - 新短信 → 右下角弹窗，**复制验证码 / 复制全文** 一键完成，点击内容打开主窗口
 - 工具栏：搜索、刷新、复制最新验证码、测试弹窗、设置
-- 设置里可改 token、域名（默认 `smsync.h6.fan`，备用 `smsync.qisop.com`，自动故障转移）、弹窗/提示音开关、**开机自启**（应用内核原生实现，无需手动加注册表/计划任务）
+- 设置里可改登录账号（用户名/密码）、域名（默认 `smsync.h6.fan`，备用 `smsync.qisop.com`，自动故障转移）、弹窗/提示音开关、**开机自启**（应用内核原生实现，无需手动加注册表/计划任务）。登录换取 JWT，过期自动重新登录
 
 ### 打包 Windows 安装包
 
@@ -104,14 +113,14 @@ npm run dist   # 输出 dist/SMSync Setup <版本号>.exe（NSIS 安装包）
 
 ### 4. 其他客户端（可选）
 
-- **手机/网页**：浏览器打开 `http://服务器地址:8000`，输入 token，点"开启通知"，可"添加到主屏幕"装成 APP
+- **手机/网页**：浏览器打开 `http://服务器地址:8000`，用账号密码登录，点"开启通知"，可"添加到主屏幕"装成 APP
 - **Python 通知器**：`cd client_pc && pip install -r requirements.txt && python notifier.py`
 
 ## 服务器部署（1Panel + Docker）
 
 ```bash
 git clone <仓库地址> /opt/smsync && cd /opt/smsync
-cp .env.example .env    # 填入正式 SMSYNC_TOKEN
+cp .env.example .env    # 可选：设置 admin 初始密码 / JWT 密钥
 docker compose up -d
 ```
 
@@ -121,10 +130,15 @@ docker compose up -d
 
 ## API
 
-所有接口需要请求头 `Authorization: Bearer <SMSYNC_TOKEN>`。
+除 `/api/v1/health` 和 `/api/v1/auth/login` 外，所有接口需要请求头 `Authorization: Bearer <JWT>`（登录获取，默认 7 天过期，客户端自动重新登录）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| POST | `/api/v1/auth/login` | 登录 `{username, password}` → `{access_token, user}`；连续失败 5 次锁 60 秒 |
+| GET | `/api/v1/auth/me` | 当前登录用户信息 |
+| POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |
+| GET/POST | `/api/v1/users` | 用户列表 / 注册用户（仅 admin） |
+| PATCH/DELETE | `/api/v1/users/{id}` | 重置密码/改角色/启禁用、删除用户（仅 admin，保护最后一个 admin） |
 | GET | `/api/v1/health` | 健康检查（无需鉴权） |
 | POST | `/api/v1/sms` | 上报短信 `{sender, text, received_at?, client_msg_id?}`；`client_msg_id` 幂等去重 |
 | GET | `/api/v1/sms?limit=&before_id=` | 分页拉取（倒序） |
@@ -136,8 +150,8 @@ docker compose up -d
 | GET | `/api/v1/calls` | 通话记录 |
 | POST | `/api/v1/calls/dial` `/answer` `/hangup` | 呼叫控制（转发 agent，agent 离线返回 503） |
 | POST/GET | `/api/v1/calls/{id}/recording` | 上传 / 播放通话录音（WAV） |
-| WS | `/ws?token=` | 客户端推送：`sms` / `delete` / `call` / `sms_sent` / `agent` |
-| WS | `/ws/agent?token=` | agent 指令通道（下行命令 + ack） |
+| WS | `/ws?token=<JWT>` | 客户端推送：`sms` / `delete` / `call` / `sms_sent` / `agent` |
+| WS | `/ws/agent?token=<JWT>` | agent 指令通道（下行命令 + ack） |
 
 ## 语音通话（树莓派）
 
@@ -159,13 +173,13 @@ schtasks /create /tn SMSyncServer /tr "cmd /c cd /d D:\DEV_AI\smsync\server && C
 
 ## 安全设计
 
-- **鉴权**：所有 API（除 `/api/v1/health`）与两个 WS 通道都要求 token，比较用常数时间算法（防计时侧信道）。token 是 192 位随机串，永远不要提交进 git
-- **传输**：token 在 HTTP 头与 WS 查询参数里明文传输，**公网部署必须套 HTTPS**（1Panel 反代 + SSL），否则 token 与短信内容会被窃听
+- **鉴权**：多用户 + JWT（HS256，密钥在数据目录 `.jwt_secret` 或 `SMSYNC_JWT_SECRET`）。密码 PBKDF2-HMAC-SHA256（10 万次迭代）哈希存储；登录连续失败 5 次锁 60 秒；禁用/删除用户后其 JWT 立即失效。除 `/api/v1/health` 和登录接口外所有 API 与两个 WS 通道都要求有效 JWT；用户管理接口仅 admin
+- **传输**：JWT 在 HTTP 头与 WS 查询参数里明文传输，**公网部署必须套 HTTPS**（1Panel 反代 + SSL），否则凭据与短信内容会被窃听
 - **AT 指令注入**：拨号/发短信的号码在服务端做白名单校验（仅 `0-9+*#,`，≤20 位），非法输入 422 拒绝，到不了 modem
 - **注入与 XSS**：数据库全部参数化查询；PWA 与 Electron 界面渲染短信/号码统一转义（`esc()` / `textContent`）
 - **输入限制**：短信正文 ≤5000 字符、发送正文 ≤2000、录音上传 ≤25MB、通话事件的 direction/status 为枚举白名单
 - **CORS**：页面与 API 同源，未放开任何跨域
-- **容器**：非 root 用户（uid 10001）运行、根文件系统只读、drop 全部 capabilities、no-new-privileges；`.dockerignore` 排除 `.token` 与数据库文件
+- **容器**：非 root 用户（uid 10001）运行、根文件系统只读、drop 全部 capabilities、no-new-privileges；`.dockerignore` 排除 `.jwt_secret`、`.admin_credentials` 与数据库文件
 - **Electron**：渲染进程 `sandbox + contextIsolation + 禁用 nodeIntegration`，只经 contextBridge 暴露少量 IPC；禁止新开窗口与页面导航
 - **响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
 

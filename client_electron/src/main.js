@@ -19,14 +19,17 @@ const base = require("./config");
 // ---------------------------------------------------------------- settings
 
 const DEFAULT_SETTINGS = {
-  token: "", // empty -> fall back to env / .env
+  username: "", // empty -> fall back to env / .env
+  password: "", // empty -> fall back to env / .env
   domains: "", // comma separated, empty -> env / built-in defaults
   popupEnabled: true,
   soundEnabled: true,
   autoStart: false,
 };
 let settings = { ...DEFAULT_SETTINGS };
-let effToken = base.token;
+let effToken = null; // 登录后拿到的 JWT，不再是静态 token
+let effUsername = base.username;
+let effPassword = base.password;
 let effServers = base.servers;
 let manualReconnect = false;
 
@@ -41,7 +44,8 @@ function loadSettings() {
 }
 
 function applyConfig() {
-  effToken = settings.token || base.token;
+  effUsername = settings.username || base.username;
+  effPassword = settings.password || base.password;
   const doms = (settings.domains || "")
     .split(",")
     .map((d) => d.trim())
@@ -210,11 +214,50 @@ function scheduleReconnect(delayMs) {
   reconnectTimer = setTimeout(connect, delayMs);
 }
 
-function connect() {
+// 用保存的用户名密码向当前服务器换 JWT；失败同样计入故障转移次数
+let loginPromise = null;
+function login() {
+  if (loginPromise) return loginPromise; // 避免并发重复登录
+  loginPromise = (async () => {
+    try {
+      const r = await fetch(`${currentBase()}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: effUsername, password: effPassword }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      effToken = data.access_token;
+      console.log(`login ok: ${currentName()} (${data.user?.username || effUsername})`);
+      return true;
+    } catch (e) {
+      effToken = null;
+      console.error(`login failed: ${currentName()} ${e.message}`);
+      failedAttempts += 1;
+      if (failedAttempts >= 3) {
+        serverIndex = (serverIndex + 1) % effServers.length;
+        failedAttempts = 0;
+        console.log(`failover -> ${currentName()}`);
+      }
+      // WS 还连着时（relogin 场景）不重复建连，只等下次自然重连
+      if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect(3000);
+      return false;
+    } finally {
+      loginPromise = null;
+    }
+  })();
+  return loginPromise;
+}
+
+async function connect() {
   if (!effToken) {
-    console.error("SMSYNC_TOKEN not set - open settings or edit .env");
-    scheduleReconnect(15000);
-    return;
+    if (!effUsername || !effPassword) {
+      console.error("SMSYNC_USERNAME/SMSYNC_PASSWORD not set - open settings or edit .env");
+      scheduleReconnect(15000);
+      return;
+    }
+    // 没有 JWT 先登录；失败时 login() 内部已安排重试/故障转移
+    if (!(await login())) return;
   }
   try {
     ws = new WebSocket(currentWs());
@@ -249,11 +292,16 @@ function connect() {
       if (mainWindow) mainWindow.webContents.send("agent-status", msg.data);
     }
   });
-  const onLost = () => {
+  const onLost = (code) => {
     broadcastStatus(false);
     if (manualReconnect) {
       manualReconnect = false;
       return scheduleReconnect(200);
+    }
+    if (code === 4401) {
+      // JWT 过期/被吊销：清掉令牌，重连时 connect() 会先重新登录
+      effToken = null;
+      return scheduleReconnect(1000);
     }
     failedAttempts += 1;
     if (failedAttempts >= 3) {
@@ -271,6 +319,7 @@ function reconnect() {
   manualReconnect = true;
   serverIndex = 0;
   failedAttempts = 0;
+  effToken = null; // 凭据可能已改，重连前强制重新登录
   if (ws) ws.terminate();
   else scheduleReconnect(0);
 }
@@ -282,12 +331,22 @@ ipcMain.handle("copy-text", (event, text) => {
   event.sender.send("copied");
 });
 
-ipcMain.handle("get-config", () => ({
-  baseUrl: currentBase(),
-  token: effToken,
-  domain: currentName(),
-  version: app.getVersion(),
-}));
+ipcMain.handle("get-config", async () => {
+  // renderer 拿配置去发 REST 请求，确保已有 JWT
+  if (!effToken && effUsername && effPassword) await login();
+  return {
+    baseUrl: currentBase(),
+    token: effToken,
+    domain: currentName(),
+    version: app.getVersion(),
+  };
+});
+
+// renderer 的 REST 请求遇到 401 时调用：重新登录并返回新 JWT
+ipcMain.handle("relogin", async () => {
+  effToken = null;
+  return (await login()) ? effToken : null;
+});
 
 ipcMain.handle("get-settings", () => ({
   ...settings,

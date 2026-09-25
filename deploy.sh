@@ -1,41 +1,54 @@
 #!/usr/bin/env bash
 # 1Panel 计划任务（Shell 脚本类型）定时调用：
 #   cd /opt/smsync && ./deploy.sh
-# 逻辑：先 fetch 比对远端，git 拉到新提交才重新部署；
-#       用 .last_deployed 记录上次部署的提交，无更新时连 docker compose 都不执行。
-set -e
-cd "$(dirname "$0")"
+#
+# 逻辑：
+#   1. fetch 远端，比对本地 HEAD；
+#   2. 有新提交则 ff-only 拉取（本地分叉则报错退出，不自动合并）；
+#   3. HEAD 与 .last_deployed 相同 → 直接退出，连 docker compose 都不执行；
+#   4. HEAD 不同 → docker compose up -d --build；
+#   5. 只有部署成功才写 marker，失败则下一轮自动重试。
+#
+# 依赖：git、docker（compose v2 插件或独立 docker-compose）
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")"
 
-MARKER=.last_deployed
+readonly MARKER=".last_deployed"
+readonly LOCKFILE=".deploy.lock"
 
-# 兼容 docker compose v2 插件与老的 docker-compose 独立命令
-if docker compose version >/dev/null 2>&1; then
-  DC="docker compose"
-elif command -v docker-compose >/dev/null 2>&1; then
-  DC="docker-compose"
-else
-  log "ERROR: docker compose not found"
-  exit 1
-fi
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
-git fetch --quiet origin || { log "git fetch failed (network?), skip this round"; exit 0; }
-
-LOCAL=$(git rev-parse HEAD)
-BRANCH=$(git branch --show-current)
-REMOTE=$(git rev-parse "origin/$BRANCH" 2>/dev/null || true)
-
-if [ -z "$REMOTE" ]; then
-  log "no upstream for branch '$BRANCH', skip"
+# ---------- 单实例锁：避免上一轮未结束又被下一次 cron 触发 ----------
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+  log "another deploy is running, skip"
   exit 0
 fi
 
-# 有更新先拉代码
-if [ "$LOCAL" != "$REMOTE" ]; then
+# ---------- 选择 docker compose 命令 ----------
+if docker compose version >/dev/null 2>&1; then
+  DC=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  DC=(docker-compose)
+else
+  die "docker compose not found"
+fi
+
+# ---------- 拉取远端 ----------
+if ! git fetch --quiet origin; then
+  log "git fetch failed (network?), skip this round"
+  exit 0
+fi
+
+BRANCH=$(git symbolic-ref --short -q HEAD) || die "detached HEAD, refuse to deploy"
+REMOTE=$(git rev-parse "origin/$BRANCH" 2>/dev/null) || die "no upstream origin/$BRANCH"
+LOCAL=$(git rev-parse HEAD)
+
+if [[ "$LOCAL" != "$REMOTE" ]]; then
   if ! git merge-base --is-ancestor "$LOCAL" "$REMOTE"; then
-    log "ERROR: local branch has diverged from origin/$BRANCH, manual fix required"
-    exit 1
+    die "local branch has diverged from origin/$BRANCH, manual fix required"
   fi
   log "update available: ${LOCAL:0:8} -> ${REMOTE:0:8}"
   git pull --ff-only
@@ -44,28 +57,17 @@ fi
 HEAD=$(git rev-parse HEAD)
 LAST=$(cat "$MARKER" 2>/dev/null || true)
 
-# 容器是否在跑：先取容器 ID 再逐个 inspect，不依赖 compose ps 的 --status 参数（旧版不支持）
-container_running() {
-  local id
-  for id in $($DC ps -q 2>/dev/null); do
-    if [ "$(docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null)" = "true" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-# 三条件都满足才跳过：提交没变化、上次部署成功过、容器还在跑
-if [ "$HEAD" = "$LAST" ] && container_running; then
-  log "already deployed ${HEAD:0:8}, skip"
+# ---------- 关键判断：HEAD 没变就直接退出，不碰 docker ----------
+if [[ "$HEAD" == "$LAST" ]]; then
+  log "no new commit (${HEAD:0:8}), skip"
   exit 0
 fi
 
-if [ "$HEAD" != "$LAST" ]; then
-  log "deploying ${HEAD:0:8} ..."
+# ---------- 部署（失败不写 marker，下轮自动重试） ----------
+log "deploying ${HEAD:0:8} (last: ${LAST:0:8}) ..."
+if "${DC[@]}" up -d --build --remove-orphans; then
+  printf '%s\n' "$HEAD" > "$MARKER.tmp" && mv -f "$MARKER.tmp" "$MARKER"
+  log "deploy finished (${HEAD:0:8})"
 else
-  log "container not running, redeploying ${HEAD:0:8} ..."
+  die "docker compose up failed, marker kept at '${LAST:-<none>}' for retry"
 fi
-$DC up -d --build
-echo "$HEAD" > "$MARKER"
-log "deploy finished (${HEAD:0:8})"

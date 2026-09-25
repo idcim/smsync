@@ -2,6 +2,8 @@
 .env
 client_electron/.env
 server/.token
+server/.jwt_secret
+server/.admin_credentials
 agent/config.ini
 client_pc/config.ini
 
@@ -9,6 +11,8 @@ client_pc/config.ini
 server/smsync.db
 agent/outbox.db
 .last_deployed
+.deploy.lock
+*.log
 *.db-journal
 *.db-wal
 *.db-shm
@@ -22,6 +26,7 @@ __pycache__/
 node_modules/
 client_electron/dist/
 client_electron/release/
+admin/dist/
 
 # ---- pyinstaller / 安装包产物 ----
 agent/build/

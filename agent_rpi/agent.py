@@ -14,6 +14,7 @@ import logging
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -21,6 +22,7 @@ from pathlib import Path
 import serial
 
 from audio import CallRecorder
+from auth import JwtAuth
 from modem import Modem, classify_urc
 from outbox import Outbox
 from uplink import Uplink
@@ -42,18 +44,18 @@ def load_config() -> configparser.ConfigParser:
         if path.exists():
             cfg.read(path, encoding="utf-8")
             if name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your token!)", name)
+                log.warning("config.ini not found, using %s (copy it and set your username/password!)", name)
             return cfg
     sys.exit("no config.ini / config.example.ini found in agent_rpi/")
 
 
 class Api:
-    def __init__(self, base_url: str, token: str):
+    def __init__(self, base_url: str, auth: JwtAuth):
         self.base = base_url.rstrip("/")
-        self.token = token
+        self.auth = auth
 
-    def _request(self, method: str, path: str, body=None, raw=False, timeout=15.0):
-        headers = {"Authorization": f"Bearer {self.token}"}
+    def _request(self, method: str, path: str, body=None, raw=False, timeout=15.0, _retried=False):
+        headers = {"Authorization": f"Bearer {self.auth.token()}"}
         data = body
         if raw:
             headers["Content-Type"] = "application/octet-stream"
@@ -61,11 +63,19 @@ class Api:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read()
-            if resp.status >= 300:
-                raise RuntimeError(f"server returned HTTP {resp.status}")
-            return json.loads(payload) if payload and not raw else payload
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read()
+                if resp.status >= 300:
+                    raise RuntimeError(f"server returned HTTP {resp.status}")
+                return json.loads(payload) if payload and not raw else payload
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and not _retried:
+                # JWT 过期：重新登录后重试一次
+                log.info("JWT 失效，重新登录后重试")
+                self.auth.refresh()
+                return self._request(method, path, body, raw, timeout, _retried=True)
+            raise
 
     def post_sms(self, payload: dict):
         return self._request("POST", "/api/v1/sms", payload)
@@ -84,10 +94,13 @@ class Agent:
             cfg.getint("modem", "baudrate", fallback=115200),
         )
         self.modem_lock = threading.Lock()
-        self.api = Api(
-            cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
-            cfg.get("server", "token", fallback=""),
+        server_url = cfg.get("server", "url", fallback="http://127.0.0.1:8000")
+        self.auth = JwtAuth(
+            server_url,
+            cfg.get("server", "username", fallback=""),
+            cfg.get("server", "password", fallback=""),
         )
+        self.api = Api(server_url, self.auth)
         self.outbox = Outbox(str(BASE_DIR / cfg.get("agent", "outbox_db", fallback="outbox.db")))
         self.heartbeat_sec = cfg.getint("agent", "heartbeat_sec", fallback=30)
         self.flush_sec = cfg.getint("agent", "flush_sec", fallback=10)
@@ -103,7 +116,7 @@ class Agent:
 
         self._call_server_ids: dict[str, int] = {}
         self.voice = CallManager(on_event=self._on_call_event, on_call_end=self._on_call_end)
-        self.uplink = Uplink(self.api.base, self.api.token, self.execute_command)
+        self.uplink = Uplink(self.api.base, self.auth, self.execute_command)
 
         self._last_heartbeat = 0.0
         self._last_flush = 0.0

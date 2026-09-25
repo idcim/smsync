@@ -62,6 +62,7 @@
   <span id="dot" class="dot"></span>
   <h1>SMSync</h1>
   <button id="notifyBtn">开启通知</button>
+  <button id="logoutBtn" style="background:#30363d">退出</button>
 </header>
 <nav>
   <button class="active" data-page="pageSms">短信</button>
@@ -77,10 +78,12 @@
 </div>
 
 <div id="setup">
-  <h2 style="margin-top:0">连接服务器</h2>
-  <p style="color:#8b949e;font-size:13px">请输入访问令牌（服务器启动时打印的 token，或 server/.token 文件内容）</p>
-  <input id="tokenInput" type="password" placeholder="Access Token">
-  <button id="saveBtn" style="width:100%">保存并连接</button>
+  <h2 style="margin-top:0">登录 SMSync</h2>
+  <p style="color:#8b949e;font-size:13px">使用管理员在 <a href="/admin/" style="color:#58a6ff">管理后台</a> 注册的账号登录</p>
+  <input id="userInput" placeholder="用户名" autocomplete="username">
+  <input id="passInput" type="password" placeholder="密码" autocomplete="current-password">
+  <p id="loginErr" style="color:#f85149;font-size:13px;display:none;margin:0 0 10px"></p>
+  <button id="saveBtn" style="width:100%">登录</button>
 </div>
 
 <main>
@@ -105,7 +108,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let token = localStorage.getItem('smsync_token') || '';
+localStorage.removeItem('smsync_token');  // 清理旧版静态 token 残留
+let token = localStorage.getItem('smsync_jwt') || '';
 let ws = null, oldestId = null, retryMs = 1000, activeCall = null;
 
 function esc(s) {
@@ -120,7 +124,7 @@ async function api(path, method = 'GET', body = null) {
   const opt = {method, headers: {Authorization: 'Bearer ' + token}};
   if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(path, opt);
-  if (r.status === 401) { localStorage.removeItem('smsync_token'); location.reload(); throw new Error('401'); }
+  if (r.status === 401) { localStorage.removeItem('smsync_jwt'); location.reload(); throw new Error('401'); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
   return data;
@@ -307,11 +311,30 @@ function start() {
   loadHistory().catch(console.error);
   connect();
 }
-$('saveBtn').onclick = () => {
-  token = $('tokenInput').value.trim();
-  if (!token) return;
-  localStorage.setItem('smsync_token', token);
-  start();
+$('saveBtn').onclick = async () => {
+  const u = $('userInput').value.trim(), p = $('passInput').value;
+  if (!u || !p) return;
+  $('saveBtn').disabled = true;
+  try {
+    const r = await fetch('/api/v1/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(r.status === 429 ? '失败次数过多，请 1 分钟后再试' : (d.detail || '登录失败'));
+    token = d.access_token;
+    localStorage.setItem('smsync_jwt', token);
+    start();
+  } catch (e) {
+    const el = $('loginErr');
+    el.textContent = e.message;
+    el.style.display = 'block';
+  }
+  $('saveBtn').disabled = false;
+};
+$('logoutBtn').onclick = () => {
+  localStorage.removeItem('smsync_jwt');
+  location.reload();
 };
 $('more').onclick = () => oldestId && loadHistory(oldestId).catch(console.error);
 $('notifyBtn').onclick = async () => {

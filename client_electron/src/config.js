@@ -25,7 +25,8 @@ function loadEnvFile() {
 
 loadEnvFile();
 
-const token = process.env.SMSYNC_TOKEN || "";
+const username = process.env.SMSYNC_USERNAME || "";
+const password = process.env.SMSYNC_PASSWORD || "";
 const raw = (process.env.SMSYNC_DOMAINS || "")
   .split(",")
   .map((d) => d.trim())
@@ -42,4 +43,4 @@ function toServer(d) {
 
 const servers = (raw.length ? raw : DEFAULT_DOMAINS).map(toServer);
 
-module.exports = { token, servers, toServer };
+module.exports = { username, password, servers, toServer };

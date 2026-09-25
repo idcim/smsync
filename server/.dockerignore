@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 smsync.db
 .token
+.jwt_secret
+.admin_credentials

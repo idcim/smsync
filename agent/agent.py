@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -50,17 +51,42 @@ def load_config() -> configparser.ConfigParser:
         if path.exists():
             cfg.read(path, encoding="utf-8")
             if path.name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your token!)", path)
+                log.warning("config.ini not found, using %s (copy it and set your username/password!)", path)
             return cfg
     sys.exit("no config.ini / config.example.ini found")
 
 
 class Uploader:
-    def __init__(self, base_url: str, token: str):
-        self.url = base_url.rstrip("/") + "/api/v1/sms"
-        self.token = token
+    def __init__(self, base_url: str, username: str, password: str):
+        self.base = base_url.rstrip("/")
+        self.url = self.base + "/api/v1/sms"
+        self.username = username
+        self.password = password
+        self.token: str | None = None  # JWT，首次发送前登录获取
 
-    def send(self, payload: dict, timeout: float = 10.0):
+    def login(self):
+        """用用户名密码换 JWT；429（连续失败被锁定）时等 60 秒再试。"""
+        while True:
+            req = urllib.request.Request(
+                self.base + "/api/v1/auth/login",
+                data=json.dumps({"username": self.username, "password": self.password}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10.0) as resp:
+                    data = json.loads(resp.read())
+                self.token = data["access_token"]
+                log.info("已登录为 %s", data.get("user", {}).get("username", self.username))
+                return
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    log.warning("登录连续失败被锁定，60 秒后重试")
+                    time.sleep(60)
+                    continue
+                raise RuntimeError(f"login failed: HTTP {e.code}")
+
+    def _post(self, payload: dict, timeout: float):
         req = urllib.request.Request(
             self.url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -74,6 +100,19 @@ class Uploader:
             if resp.status >= 300:
                 raise RuntimeError(f"server returned HTTP {resp.status}")
 
+    def send(self, payload: dict, timeout: float = 10.0):
+        if self.token is None:
+            self.login()
+        try:
+            self._post(payload, timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            # JWT 过期：重新登录后重试一次
+            log.info("JWT 失效，重新登录后重试")
+            self.login()
+            self._post(payload, timeout)
+
 
 class Agent:
     def __init__(self, cfg: configparser.ConfigParser):
@@ -83,7 +122,8 @@ class Agent:
         )
         self.uploader = Uploader(
             cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
-            cfg.get("server", "token", fallback=""),
+            cfg.get("server", "username", fallback=""),
+            cfg.get("server", "password", fallback=""),
         )
         outbox_name = cfg.get("agent", "outbox_db", fallback="outbox.db")
         outbox_path = Path(outbox_name)

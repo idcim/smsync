@@ -1,24 +1,29 @@
 import asyncio
 import contextlib
 import json
+import os
 import secrets
+import time
 import uuid
 from typing import Literal, Optional
 
+import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from config import BASE_DIR, DB_PATH, RECORDINGS_DIR, TOKEN
+from auth import EXPIRE_HOURS, decode_token, hash_password, make_token, verify_password
+from config import BASE_DIR, DB_PATH, RECORDINGS_DIR
 from db import Database, to_event
 
-app = FastAPI(title="SMSync", version="1.0")
-# 所有页面与 API 同源（PWA 由本服务托管），无需放开 CORS；浏览器跨域默认拒绝
+app = FastAPI(title="SMSync", version="2.0")
+# 所有页面与 API 同源（PWA/管理后台由本服务托管），无需放开 CORS；浏览器跨域默认拒绝
 db = Database(DB_PATH)
 
 MAX_RECORDING_BYTES = 25 * 1024 * 1024  # 通话录音上传上限 25MB
 PHONE_PATTERN = r"^[0-9+*#,]{1,20}$"    # 白名单字符，杜绝 AT 指令注入（agent 直接拼进 ATD）
+USERNAME_PATTERN = r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]{1,31}$"
 
 
 @app.middleware("http")
@@ -57,10 +62,90 @@ class DialIn(BaseModel):
     number: str = Field(pattern=PHONE_PATTERN)
 
 
-def check_token(authorization: str = Header(default="")):
-    # 常数时间比较，防计时侧信道
-    if not secrets.compare_digest(authorization, f"Bearer {TOKEN}"):
-        raise HTTPException(status_code=401, detail="invalid token")
+class LoginIn(BaseModel):
+    username: str = Field(max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class ChangePasswordIn(BaseModel):
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class UserCreateIn(BaseModel):
+    username: str = Field(pattern=USERNAME_PATTERN)
+    password: str = Field(min_length=6, max_length=128)
+    role: Literal["admin", "user"] = "user"
+
+
+class UserUpdateIn(BaseModel):
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    role: Optional[Literal["admin", "user"]] = None
+    disabled: Optional[bool] = None
+
+
+# ---- 认证依赖 ----
+
+def _user_from_token(token: str) -> dict:
+    try:
+        payload = decode_token(token)
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    user = db.get_user(int(payload["sub"]))
+    if not user or user["disabled"]:
+        raise HTTPException(status_code=401, detail="user disabled or deleted")
+    return user
+
+
+def current_user(authorization: str = Header(default="")) -> dict:
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    return _user_from_token(token)
+
+
+def require_admin(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="admin only")
+    return user
+
+
+def public_user(user: dict) -> dict:
+    return {"id": user["id"], "username": user["username"], "role": user["role"]}
+
+
+# ---- 登录限流：同一 用户名+IP 连续失败 5 次锁 60 秒 ----
+
+_login_fails: dict[tuple[str, str], tuple[int, float]] = {}
+
+
+def _login_throttle(username: str, ip: str):
+    key = (username, ip)
+    fails, lock_until = _login_fails.get(key, (0, 0.0))
+    if lock_until > time.monotonic():
+        raise HTTPException(status_code=429, detail="too many attempts, try later")
+    return key, fails
+
+
+def bootstrap_admin():
+    """首次启动（无任何用户）时创建管理员。密码取 SMSYNC_ADMIN_PASSWORD，
+    否则随机生成并写入 server/.admin_credentials（该文件已 gitignore）。"""
+    if db.count_users() > 0:
+        return
+    username = os.environ.get("SMSYNC_ADMIN_USER", "admin")
+    password = os.environ.get("SMSYNC_ADMIN_PASSWORD")
+    if not password:
+        from config import DATA_DIR
+        password = secrets.token_urlsafe(12)
+        (DATA_DIR / ".admin_credentials").write_text(
+            f"username: {username}\npassword: {password}\n", encoding="utf-8")
+    db.create_user(username, hash_password(password), "admin")
+    print(f"[smsync] created admin user '{username}'"
+          + ("" if os.environ.get("SMSYNC_ADMIN_PASSWORD")
+             else " (random password in .admin_credentials)"))
+
+
+bootstrap_admin()
 
 
 class WsHub:
@@ -150,7 +235,86 @@ def health():
     return {"ok": True}
 
 
-@app.post("/api/v1/sms", status_code=201, dependencies=[Depends(check_token)])
+# ---- auth & users ----
+
+@app.post("/api/v1/auth/login")
+def login(payload: LoginIn, request: Request):
+    ip = request.client.host if request.client else "-"
+    key, fails = _login_throttle(payload.username, ip)
+    user = db.get_user_by_username(payload.username)
+    if not user or user["disabled"] or not verify_password(payload.password, user["password_hash"]):
+        fails += 1
+        _login_fails[key] = (fails, time.monotonic() + 60 if fails >= 5 else 0.0)
+        raise HTTPException(status_code=401, detail="wrong username or password")
+    _login_fails.pop(key, None)
+    return {
+        "access_token": make_token(user),
+        "token_type": "bearer",
+        "expires_in": EXPIRE_HOURS * 3600,
+        "user": public_user(user),
+    }
+
+
+@app.get("/api/v1/auth/me")
+def me(user: dict = Depends(current_user)):
+    return public_user(user)
+
+
+@app.post("/api/v1/auth/change_password")
+def change_password(payload: ChangePasswordIn, user: dict = Depends(current_user)):
+    if not verify_password(payload.old_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="old password wrong")
+    db.update_user(user["id"], password_hash=hash_password(payload.new_password))
+    return {"ok": True}
+
+
+@app.get("/api/v1/users")
+def list_users(_: dict = Depends(require_admin)):
+    return {"items": db.list_users()}
+
+
+@app.post("/api/v1/users", status_code=201)
+def create_user(payload: UserCreateIn, _: dict = Depends(require_admin)):
+    if db.get_user_by_username(payload.username):
+        raise HTTPException(status_code=409, detail="username exists")
+    user = db.create_user(payload.username, hash_password(payload.password), payload.role)
+    return public_user(user)
+
+
+@app.patch("/api/v1/users/{user_id}")
+def update_user(user_id: int, payload: UserUpdateIn, admin: dict = Depends(require_admin)):
+    target = db.get_user(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="not found")
+    # 保护最后一个可用管理员
+    demote = (payload.role == "user" and target["role"] == "admin") or \
+             (payload.disabled and target["role"] == "admin" and not target["disabled"])
+    if demote and db.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="cannot disable/demote the last admin")
+    fields = {}
+    if payload.password is not None:
+        fields["password_hash"] = hash_password(payload.password)
+    if payload.role is not None:
+        fields["role"] = payload.role
+    if payload.disabled is not None:
+        fields["disabled"] = 1 if payload.disabled else 0
+    return db.update_user(user_id, **fields)
+
+
+@app.delete("/api/v1/users/{user_id}")
+def delete_user(user_id: int, admin: dict = Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="cannot delete yourself")
+    target = db.get_user(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="not found")
+    if target["role"] == "admin" and not target["disabled"] and db.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="cannot delete the last admin")
+    db.delete_user(user_id)
+    return {"deleted": user_id}
+
+
+@app.post("/api/v1/sms", status_code=201, dependencies=[Depends(current_user)])
 async def create_sms(payload: SmsIn):
     row, created = db.insert_sms(
         sender=payload.sender,
@@ -163,7 +327,7 @@ async def create_sms(payload: SmsIn):
     return row
 
 
-@app.get("/api/v1/sms", dependencies=[Depends(check_token)])
+@app.get("/api/v1/sms", dependencies=[Depends(current_user)])
 def list_sms(
     limit: int = Query(default=50, ge=1, le=500),
     before_id: Optional[int] = None,
@@ -171,7 +335,7 @@ def list_sms(
     return {"items": db.list_sms(limit=limit, before_id=before_id)}
 
 
-@app.get("/api/v1/sms/{sms_id}", dependencies=[Depends(check_token)])
+@app.get("/api/v1/sms/{sms_id}", dependencies=[Depends(current_user)])
 def get_sms(sms_id: int):
     row = db.get_sms(sms_id)
     if not row:
@@ -179,7 +343,7 @@ def get_sms(sms_id: int):
     return row
 
 
-@app.delete("/api/v1/sms/{sms_id}", dependencies=[Depends(check_token)])
+@app.delete("/api/v1/sms/{sms_id}", dependencies=[Depends(current_user)])
 async def delete_sms(sms_id: int):
     if not db.delete_sms(sms_id):
         raise HTTPException(status_code=404, detail="not found")
@@ -189,7 +353,7 @@ async def delete_sms(sms_id: int):
 
 # ---- sms sending (downlink via agent) ----
 
-@app.post("/api/v1/sms/send", dependencies=[Depends(check_token)])
+@app.post("/api/v1/sms/send", dependencies=[Depends(current_user)])
 async def send_sms(payload: SmsSendIn):
     row = db.insert_outbox_sms(uuid.uuid4().hex, payload.to, payload.text)
     try:
@@ -207,26 +371,26 @@ async def send_sms(payload: SmsSendIn):
     return row
 
 
-@app.get("/api/v1/sms/outbox/list", dependencies=[Depends(check_token)])
+@app.get("/api/v1/sms/outbox/list", dependencies=[Depends(current_user)])
 def list_outbox(limit: int = Query(default=50, ge=1, le=500)):
     return {"items": db.list_outbox_sms(limit=limit)}
 
 
 # ---- calls ----
 
-@app.post("/api/v1/calls", status_code=201, dependencies=[Depends(check_token)])
+@app.post("/api/v1/calls", status_code=201, dependencies=[Depends(current_user)])
 async def report_call(event: CallEventIn):
     row = db.upsert_call(event.client_msg_id, **event.model_dump(exclude={"client_msg_id"}))
     await hub.broadcast(json.dumps({"type": "call", "data": row}, ensure_ascii=False))
     return row
 
 
-@app.get("/api/v1/calls", dependencies=[Depends(check_token)])
+@app.get("/api/v1/calls", dependencies=[Depends(current_user)])
 def list_calls(limit: int = Query(default=50, ge=1, le=500)):
     return {"items": db.list_calls(limit=limit)}
 
 
-@app.post("/api/v1/calls/dial", dependencies=[Depends(check_token)])
+@app.post("/api/v1/calls/dial", dependencies=[Depends(current_user)])
 async def dial(payload: DialIn):
     try:
         ack = await agent_channel.command("dial", number=payload.number)
@@ -237,7 +401,7 @@ async def dial(payload: DialIn):
     return ack
 
 
-@app.post("/api/v1/calls/answer", dependencies=[Depends(check_token)])
+@app.post("/api/v1/calls/answer", dependencies=[Depends(current_user)])
 async def answer_call():
     try:
         ack = await agent_channel.command("answer")
@@ -248,7 +412,7 @@ async def answer_call():
     return ack
 
 
-@app.post("/api/v1/calls/hangup", dependencies=[Depends(check_token)])
+@app.post("/api/v1/calls/hangup", dependencies=[Depends(current_user)])
 async def hangup_call():
     try:
         ack = await agent_channel.command("hangup")
@@ -259,7 +423,7 @@ async def hangup_call():
     return ack
 
 
-@app.post("/api/v1/calls/{call_id}/recording", dependencies=[Depends(check_token)])
+@app.post("/api/v1/calls/{call_id}/recording", dependencies=[Depends(current_user)])
 async def upload_recording(call_id: int, request: Request):
     if not db.get_call(call_id):
         raise HTTPException(status_code=404, detail="not found")
@@ -278,7 +442,7 @@ async def upload_recording(call_id: int, request: Request):
     return {"ok": True, "size": len(data)}
 
 
-@app.get("/api/v1/calls/{call_id}/recording", dependencies=[Depends(check_token)])
+@app.get("/api/v1/calls/{call_id}/recording", dependencies=[Depends(current_user)])
 def get_recording(call_id: int):
     call = db.get_call(call_id)
     if not call or not call.get("recording_file"):
@@ -291,7 +455,12 @@ def get_recording(call_id: int):
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket, token: str = ""):
-    if not secrets.compare_digest(token, TOKEN):
+    try:
+        payload = decode_token(token)
+        user = db.get_user(int(payload["sub"]))
+        if not user or user["disabled"]:
+            raise ValueError("user gone")
+    except Exception:
         await websocket.close(code=4401)
         return
     await websocket.accept()
@@ -308,7 +477,12 @@ async def ws(websocket: WebSocket, token: str = ""):
 
 @app.websocket("/ws/agent")
 async def ws_agent(websocket: WebSocket, token: str = ""):
-    if not secrets.compare_digest(token, TOKEN):
+    try:
+        payload = decode_token(token)
+        user = db.get_user(int(payload["sub"]))
+        if not user or user["disabled"]:
+            raise ValueError("user gone")
+    except Exception:
         await websocket.close(code=4401)
         return
     await websocket.accept()
@@ -334,3 +508,8 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+# 管理后台（admin/ 前端构建产物，hash 路由无需 fallback）
+_admin_dir = BASE_DIR / "static" / "admin"
+if _admin_dir.exists():
+    app.mount("/admin", StaticFiles(directory=_admin_dir, html=True), name="admin")
