@@ -11,14 +11,21 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
          background: #0d1117; color: #e6edf3; }
-  header { position: sticky; top: 0; background: #161b22; padding: 12px 16px;
+  header { position: sticky; top: 0; background: #161b22; padding: 12px 16px; z-index: 5;
            display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #30363d; }
   header h1 { font-size: 17px; margin: 0; flex: 1; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #f85149; }
   .dot.on { background: #3fb950; }
   button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
            padding: 8px 14px; font-size: 14px; cursor: pointer; }
+  nav { display: flex; background: #161b22; border-bottom: 1px solid #30363d;
+        position: sticky; top: 45px; z-index: 5; }
+  nav button { flex: 1; background: none; color: #8b949e; border-radius: 0;
+               border-bottom: 2px solid transparent; padding: 10px 0; }
+  nav button.active { color: #e6edf3; border-bottom-color: #1f6feb; }
   main { max-width: 720px; margin: 0 auto; padding: 12px; }
+  .page { display: none; }
+  .page.active { display: block; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
           padding: 12px 14px; margin-bottom: 10px; }
   .card .sender { font-weight: 600; color: #58a6ff; }
@@ -27,6 +34,21 @@
                font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1; }
   .card .del:hover { color: #f85149; }
   .card .text { margin-top: 6px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+  .card .missed { color: #f85149; }
+  .card audio { width: 100%; margin-top: 8px; height: 32px; }
+  #callbar { display: none; position: sticky; top: 84px; z-index: 6; margin: 12px;
+             background: #1c2a3d; border: 1px solid #1f6feb; border-radius: 12px;
+             padding: 14px 16px; align-items: center; gap: 10px; }
+  #callbar .num { font-size: 20px; font-weight: 700; color: #58a6ff; flex: 1; }
+  #callbar .st { color: #d29922; font-size: 13px; }
+  .green { background: #238636; }
+  .red { background: #da3633; }
+  .sendform input, .sendform textarea { width: 100%; padding: 10px; border-radius: 6px;
+      border: 1px solid #30363d; background: #0d1117; color: #e6edf3;
+      font-size: 14px; outline: none; margin-bottom: 10px; }
+  .sendform textarea { height: 90px; resize: vertical; }
+  .outitem { font-size: 13px; }
+  .st-ok { color: #3fb950; } .st-bad { color: #f85149; } .st-wait { color: #d29922; }
   #setup { max-width: 420px; margin: 15vh auto; background: #161b22; border: 1px solid #30363d;
            border-radius: 12px; padding: 24px; display: none; }
   #setup input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 6px;
@@ -38,9 +60,21 @@
 <body>
 <header>
   <span id="dot" class="dot"></span>
-  <h1>SMSync 短信同步</h1>
+  <h1>SMSync</h1>
   <button id="notifyBtn">开启通知</button>
 </header>
+<nav>
+  <button class="active" data-page="pageSms">短信</button>
+  <button data-page="pageCalls">通话</button>
+  <button data-page="pageSend">发短信</button>
+</nav>
+
+<div id="callbar">
+  <span class="num" id="cbNum"></span>
+  <span class="st" id="cbSt"></span>
+  <button class="green" id="cbAnswer">接听</button>
+  <button class="red" id="cbHangup">挂断</button>
+</div>
 
 <div id="setup">
   <h2 style="margin-top:0">连接服务器</h2>
@@ -49,13 +83,30 @@
   <button id="saveBtn" style="width:100%">保存并连接</button>
 </div>
 
-<main id="list"></main>
-<button id="more" style="display:none">加载更早的短信</button>
+<main>
+  <div class="page active" id="pageSms"><div id="list"></div>
+    <button id="more" style="display:none">加载更早的短信</button></div>
+  <div class="page" id="pageCalls">
+    <div class="card sendform" style="display:flex;gap:8px">
+      <input id="dialNum" placeholder="输入号码拨打电话…" style="margin:0;flex:1">
+      <button class="green" id="dialBtn">拨打</button>
+    </div>
+    <div id="callList"></div>
+  </div>
+  <div class="page" id="pageSend">
+    <div class="card sendform">
+      <input id="sendTo" placeholder="收件人号码，如 +8613800138000">
+      <textarea id="sendText" placeholder="短信内容（支持中文）"></textarea>
+      <button id="sendBtn">发送</button>
+    </div>
+    <div id="outList"></div>
+  </div>
+</main>
 
 <script>
 const $ = id => document.getElementById(id);
 let token = localStorage.getItem('smsync_token') || '';
-let ws = null, oldestId = null, retryMs = 1000;
+let ws = null, oldestId = null, retryMs = 1000, activeCall = null;
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -65,6 +116,25 @@ function fmt(iso) {
   const d = new Date(iso);
   return isNaN(d) ? iso : d.toLocaleString('zh-CN', {hour12: false});
 }
+async function api(path, method = 'GET', body = null) {
+  const opt = {method, headers: {Authorization: 'Bearer ' + token}};
+  if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  if (r.status === 401) { localStorage.removeItem('smsync_token'); location.reload(); throw new Error('401'); }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+  return data;
+}
+
+// ---- tabs ----
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === b.dataset.page));
+  if (b.dataset.page === 'pageCalls') loadCalls();
+  if (b.dataset.page === 'pageSend') loadOutbox();
+});
+
+// ---- sms ----
 function render(item, prepend) {
   const div = document.createElement('div');
   div.className = 'card';
@@ -74,21 +144,14 @@ function render(item, prepend) {
     <div class="text">${esc(item.text)}</div>`;
   div.querySelector('.del').onclick = async () => {
     if (!confirm('确定删除这条短信吗？')) return;
-    const r = await fetch('/api/v1/sms/' + item.id, {
-      method: 'DELETE', headers: { Authorization: 'Bearer ' + token }
-    });
-    if (r.ok || r.status === 404) removeCard(item.id);
+    try { await api('/api/v1/sms/' + item.id, 'DELETE'); } catch (e) {}
+    removeCard(item.id);
   };
   prepend ? $('list').prepend(div) : $('list').append(div);
 }
 function removeCard(id) {
-  const el = document.querySelector(`.card[data-id="${id}"]`);
+  const el = document.querySelector(`#list .card[data-id="${id}"]`);
   if (el) el.remove();
-}
-async function api(path) {
-  const r = await fetch(path, {headers: {Authorization: 'Bearer ' + token}});
-  if (r.status === 401) { localStorage.removeItem('smsync_token'); location.reload(); throw new Error('401'); }
-  return r.json();
 }
 async function loadHistory(beforeId) {
   const q = beforeId ? `?limit=50&before_id=${beforeId}` : '?limit=50';
@@ -105,13 +168,122 @@ async function loadHistory(beforeId) {
     $('more').style.display = 'none';
   }
 }
-function notify(item) {
+function notify(title, body) {
   if (Notification.permission === 'granted') {
-    const n = new Notification('新短信：' + item.sender, {body: item.text});
+    const n = new Notification(title, {body});
     n.onclick = () => window.focus();
   }
-  try { new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=').play().catch(()=>{}); } catch(e) {}
 }
+
+// ---- calls ----
+const CALL_STATUS = { ringing: '响铃', dialing: '拨号中', alerting: '对方响铃',
+                      active: '通话中', missed: '未接', ended: '已结束', failed: '失败' };
+async function loadCalls() {
+  try {
+    const data = await api('/api/v1/calls?limit=100');
+    renderCallList(data.items);
+  } catch (e) {}
+}
+function renderCallList(items) {
+  $('callList').innerHTML = items.map(c => {
+    const bad = c.status === 'missed' || c.status === 'failed';
+    const dur = c.duration != null ? c.duration + 's' : (CALL_STATUS[c.status] || c.status);
+    return `<div class="card" data-id="${c.id}">
+      <span class="time">${esc(fmt(c.started_at || c.created_at))}</span>
+      <div class="sender ${bad ? 'missed' : ''}">${c.direction === 'out' ? '📤' : '📲'} ${esc(c.number || '未知号码')}</div>
+      <div class="text">${esc(dur)}${c.recording_file ? ` <a href="#" class="reclink" data-id="${c.id}">▶ 播放录音</a>` : ''}</div>
+    </div>`;
+  }).join('') || '<div class="empty">暂无通话记录</div>';
+  document.querySelectorAll('.reclink').forEach(a => a.onclick = async (e) => {
+    e.preventDefault();
+    try {
+      const r = await fetch(`/api/v1/calls/${a.dataset.id}/recording`,
+        {headers: {Authorization: 'Bearer ' + token}});
+      const url = URL.createObjectURL(await r.blob());
+      const audio = document.createElement('audio');
+      audio.controls = true; audio.autoplay = true; audio.src = url;
+      a.replaceWith(audio);
+    } catch (err) { alert('录音加载失败'); }
+  });
+}
+function updateCallBar() {
+  if (activeCall && ['ringing', 'dialing', 'alerting', 'active'].includes(activeCall.status)) {
+    $('callbar').style.display = 'flex';
+    $('cbNum').textContent = activeCall.number || '未知号码';
+    $('cbSt').textContent = CALL_STATUS[activeCall.status] || activeCall.status;
+    $('cbAnswer').style.display = activeCall.status === 'ringing' ? '' : 'none';
+  } else {
+    $('callbar').style.display = 'none';
+  }
+}
+function onCallEvent(c) {
+  if (['ringing', 'dialing', 'alerting', 'active'].includes(c.status)) {
+    const wasIdle = !activeCall;
+    activeCall = c;
+    if (c.direction === 'in' && c.status === 'ringing' && wasIdle)
+      notify('📞 来电', c.number || '未知号码');
+  } else if (activeCall && activeCall.id === c.id) {
+    activeCall = null;
+  }
+  updateCallBar();
+  if ($('pageCalls').classList.contains('active')) loadCalls();
+}
+$('cbAnswer').onclick = () => api('/api/v1/calls/answer', 'POST').catch(e => alert(e.message));
+$('cbHangup').onclick = () => api('/api/v1/calls/hangup', 'POST').catch(e => alert(e.message));
+$('dialBtn').onclick = async () => {
+  const num = $('dialNum').value.trim();
+  if (!num) return;
+  try { await api('/api/v1/calls/dial', 'POST', {number: num}); $('dialNum').value = ''; }
+  catch (e) { alert('拨号失败：' + e.message); }
+};
+
+// ---- send sms ----
+$('sendBtn').onclick = async () => {
+  const to = $('sendTo').value.trim(), text = $('sendText').value.trim();
+  if (!to || !text) return;
+  $('sendBtn').disabled = true;
+  try { await api('/api/v1/sms/send', 'POST', {to, text}); $('sendText').value = ''; }
+  catch (e) { alert('发送失败：' + e.message); }
+  $('sendBtn').disabled = false;
+  loadOutbox();
+};
+async function loadOutbox() {
+  try {
+    const data = await api('/api/v1/sms/outbox/list?limit=50');
+    renderOutbox(data.items);
+  } catch (e) {}
+}
+function renderOutbox(items) {
+  $('outList').innerHTML = items.map(o => {
+    const [cls, label] = o.status === 'sent' ? ['st-ok', '✓ 已发送']
+      : o.status === 'failed' ? ['st-bad', '✗ 失败']
+      : ['st-wait', '… 发送中'];
+    return `<div class="card outitem" data-id="${o.id}">
+      <span class="time">${esc(fmt(o.created_at))}</span>
+      <div class="sender">${esc(o.recipient)} <span class="${cls}">${esc(label)}</span></div>
+      <div class="text">${esc(o.text)}</div>
+    </div>`;
+  }).join('') || '<div class="empty">还没有发送记录</div>';
+}
+function onSmsSent(row) {
+  if (!$('pageSend').classList.contains('active')) return;
+  const el = document.querySelector(`#outList .card[data-id="${row.id}"]`);
+  if (el) { loadOutbox(); } else {
+    renderOutboxPrepend(row);
+  }
+}
+function renderOutboxPrepend(o) {
+  const div = document.createElement('div');
+  div.className = 'card outitem'; div.dataset.id = o.id;
+  const [cls, label] = o.status === 'sent' ? ['st-ok', '✓ 已发送']
+    : o.status === 'failed' ? ['st-bad', '✗ 失败'] : ['st-wait', '… 发送中'];
+  div.innerHTML = `<span class="time">${esc(fmt(o.created_at))}</span>
+    <div class="sender">${esc(o.recipient)} <span class="${cls}">${esc(label)}</span></div>
+    <div class="text">${esc(o.text)}</div>`;
+  $('outList').prepend(div);
+}
+
+// ---- websocket ----
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
@@ -123,10 +295,11 @@ function connect() {
   };
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'sms') { render(msg.data, true); notify(msg.data); }
+    if (msg.type === 'sms') { render(msg.data, true); notify('新短信：' + msg.data.sender, msg.data.text); }
     else if (msg.type === 'delete') { removeCard(msg.data.id); }
+    else if (msg.type === 'call') { onCallEvent(msg.data); }
+    else if (msg.type === 'sms_sent') { onSmsSent(msg.data); }
   };
-  // keepalive through proxies
   setInterval(() => { if (ws && ws.readyState === 1) ws.send('ping'); }, 25000);
 }
 function start() {

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: transparent; overflow: hidden; }
+  .card { background: #1c2128; border: 1px solid #3d444d; border-radius: 12px;
+          color: #e6edf3; height: 100vh; display: flex; flex-direction: column;
+          align-items: center; justify-content: center; gap: 8px;
+          box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+  .label { font-size: 13px; color: #8b949e; }
+  .number { font-size: 26px; font-weight: 700; color: #58a6ff; letter-spacing: 1px; }
+  .status { font-size: 13px; color: #d29922; }
+  .status.active { color: #3fb950; }
+  .ring { animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .btns { display: flex; gap: 14px; margin-top: 10px; }
+  .btns button { width: 110px; border: 0; border-radius: 22px; padding: 11px 0;
+                 font-size: 15px; font-weight: 600; cursor: pointer; color: #fff; }
+  .answer { background: #238636; }
+  .hangup { background: #da3633; }
+  .btns button:hover { filter: brightness(1.15); }
+  .btns button:disabled { opacity: .4; cursor: default; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="label">📞 来电</div>
+  <div class="number ring" id="number">未知号码</div>
+  <div class="status" id="status">响铃中…</div>
+  <div class="btns">
+    <button class="answer" id="answerBtn">接听</button>
+    <button class="hangup" id="hangupBtn">挂断</button>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let cfg = null, ringTimer = null, currentStatus = 'ringing';
+
+async function api(path) {
+  if (!cfg) cfg = await window.smsync.getConfig();
+  const r = await fetch(cfg.baseUrl + path, { method: 'POST',
+    headers: { Authorization: 'Bearer ' + cfg.token } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+}
+
+function startRingTone() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator(); const gain = ctx.createGain();
+    osc.frequency.value = 950; gain.gain.value = 0;
+    osc.connect(gain).connect(ctx.destination); osc.start();
+    let on = false;
+    ringTimer = setInterval(() => {
+      on = !on;
+      gain.gain.linearRampToValueAtTime(on ? 0.12 : 0, ctx.currentTime + 0.05);
+    }, 700);
+  } catch (e) {}
+}
+function stopRingTone() { if (ringTimer) { clearInterval(ringTimer); ringTimer = null; } }
+
+window.smsync.onCall(({ call }) => {
+  $('number').textContent = call.number || '未知号码';
+  startRingTone();
+});
+window.smsync.onCallUpdate((call) => {
+  currentStatus = call.status;
+  stopRingTone();
+  $('number').classList.remove('ring');
+  if (call.status === 'active') {
+    $('status').textContent = '通话中';
+    $('status').classList.add('active');
+    $('answerBtn').disabled = true;
+  } else {
+    const map = { missed: '未接来电', ended: '通话结束', failed: '呼叫失败' };
+    $('status').textContent = map[call.status] || call.status;
+    $('answerBtn').disabled = true;
+    $('hangupBtn').disabled = true;
+    setTimeout(() => window.close(), 2200);
+  }
+});
+$('answerBtn').onclick = async () => {
+  $('answerBtn').disabled = true;
+  try { await api('/api/v1/calls/answer'); } catch (e) {
+    $('status').textContent = '接听失败：' + e.message; $('answerBtn').disabled = false;
+  }
+};
+$('hangupBtn').onclick = async () => {
+  $('hangupBtn').disabled = true;
+  try { await api('/api/v1/calls/hangup'); } catch (e) {}
+  window.close();
+};
+</script>
+</body>
+</html>

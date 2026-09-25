@@ -13,6 +13,8 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; flex: none; }
   .dot.on { background: #3fb950; }
   .domain { font-size: 12px; color: #8b949e; white-space: nowrap; }
+  .agent { font-size: 12px; white-space: nowrap; color: #8b949e; }
+  .agent.on { color: #3fb950; }
   .spacer { flex: 1; }
   .tb { border: 1px solid #30363d; background: #21262d; color: #e6edf3; border-radius: 6px;
         padding: 6px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
@@ -20,7 +22,14 @@
   #search { border: 1px solid #30363d; background: #0d1117; color: #e6edf3; border-radius: 6px;
             padding: 6px 10px; font-size: 13px; width: 180px; outline: none; }
   #search:focus { border-color: #1f6feb; }
+  nav { display: flex; background: #161b22; border-bottom: 1px solid #30363d; }
+  nav button { flex: none; border: 0; background: none; color: #8b949e; font-size: 14px;
+               padding: 10px 22px; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: #e6edf3; border-bottom-color: #1f6feb; }
   main { flex: 1; display: flex; min-height: 0; }
+  .tabpage { flex: 1; display: none; min-height: 0; }
+  .tabpage.active { display: flex; }
+  /* sms */
   #list { width: 340px; border-right: 1px solid #30363d; overflow-y: auto; }
   .item { padding: 10px 14px; border-bottom: 1px solid #21262d; cursor: pointer; }
   .item:hover { background: #161b22; }
@@ -42,6 +51,45 @@
   .del { background: #b3382c; color: #fff; }
   .btns button:hover { filter: brightness(1.15); }
   .empty { color: #8b949e; text-align: center; margin-top: 30vh; }
+  /* calls */
+  #tabCalls { flex-direction: column; overflow-y: auto; padding: 14px; }
+  .dialrow { display: flex; gap: 8px; margin-bottom: 12px; }
+  .dialrow input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #30363d;
+                   background: #0d1117; color: #e6edf3; font-size: 15px; outline: none; }
+  .dialrow button, .actbar button { border: 0; border-radius: 6px; padding: 10px 20px;
+                   font-size: 14px; cursor: pointer; color: #fff; }
+  .green { background: #238636; }
+  .red { background: #da3633; }
+  .actbar { display: none; align-items: center; gap: 12px; background: #1c2a3d;
+            border: 1px solid #1f6feb; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; }
+  .actbar .num { font-size: 18px; font-weight: 700; color: #58a6ff; flex: 1; }
+  .actbar .st { color: #d29922; font-size: 13px; }
+  .call { display: flex; align-items: center; gap: 10px; padding: 10px 6px;
+          border-bottom: 1px solid #21262d; }
+  .call .ico { font-size: 16px; width: 22px; text-align: center; }
+  .call .num { font-weight: 600; flex: 1; }
+  .call .meta { font-size: 12px; color: #8b949e; text-align: right; }
+  .call .missed { color: #f85149; }
+  .call audio { height: 28px; width: 200px; }
+  .recbtn { border: 1px solid #30363d; background: #21262d; color: #e6edf3; border-radius: 6px;
+            padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  /* send */
+  #tabSend { flex-direction: column; overflow-y: auto; padding: 14px; }
+  .sendform { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
+              padding: 14px; margin-bottom: 14px; }
+  .sendform input, .sendform textarea { width: 100%; padding: 9px; border-radius: 6px;
+              border: 1px solid #30363d; background: #0d1117; color: #e6edf3;
+              font-size: 14px; outline: none; margin-bottom: 10px; }
+  .sendform textarea { height: 90px; resize: vertical; }
+  .sendform button { border: 0; border-radius: 6px; background: #1f6feb; color: #fff;
+                     padding: 9px 22px; font-size: 14px; cursor: pointer; }
+  .outitem { padding: 9px 6px; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .outitem .st-ok { color: #3fb950; }
+  .outitem .st-bad { color: #f85149; }
+  .outitem .st-wait { color: #d29922; }
+  .outitem .to { font-weight: 600; color: #58a6ff; }
+  .outitem .tt { color: #8b949e; font-size: 11px; float: right; }
+  .outitem .txt { margin-top: 3px; color: #c9d1d9; word-break: break-all; }
   /* settings modal */
   #mask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
           align-items: center; justify-content: center; z-index: 10; }
@@ -74,6 +122,7 @@
   <h1>SMSync 短信</h1>
   <span class="domain" id="ver"></span>
   <span class="domain" id="domain"></span>
+  <span class="agent" id="agentState">模块离线</span>
   <span class="spacer"></span>
   <input id="search" placeholder="搜索号码或内容…">
   <button class="tb" id="refreshBtn">刷新</button>
@@ -81,9 +130,37 @@
   <button class="tb" id="testBtn">测试弹窗</button>
   <button class="tb" id="settingsBtn">⚙ 设置</button>
 </header>
+<nav>
+  <button class="active" data-tab="tabSms">短信</button>
+  <button data-tab="tabCalls">通话</button>
+  <button data-tab="tabSend">发短信</button>
+</nav>
 <main>
-  <div id="list"></div>
-  <div id="detail"><div class="empty">选择左侧短信查看内容</div></div>
+  <div class="tabpage active" id="tabSms">
+    <div id="list"></div>
+    <div id="detail"><div class="empty">选择左侧短信查看内容</div></div>
+  </div>
+  <div class="tabpage" id="tabCalls">
+    <div class="actbar" id="actbar">
+      <span class="num" id="actNum"></span>
+      <span class="st" id="actSt"></span>
+      <button class="green" id="actAnswer">接听</button>
+      <button class="red" id="actHangup">挂断</button>
+    </div>
+    <div class="dialrow">
+      <input id="dialNum" placeholder="输入号码拨打电话…">
+      <button class="green" id="dialBtn">拨打</button>
+    </div>
+    <div id="callList"></div>
+  </div>
+  <div class="tabpage" id="tabSend">
+    <div class="sendform">
+      <input id="sendTo" placeholder="收件人号码，如 +8613800138000">
+      <textarea id="sendText" placeholder="短信内容（支持中文）"></textarea>
+      <button id="sendBtn">发送</button>
+    </div>
+    <div id="outList"></div>
+  </div>
 </main>
 
 <div id="mask">
@@ -113,6 +190,7 @@
 <script>
 const $ = id => document.getElementById(id);
 let cfg = null, items = [], selectedId = null, pendingBtn = null, keyword = '';
+let calls = [], outbox = [], activeCall = null;
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -136,12 +214,29 @@ function toast(msg, ok = true) {
   clearTimeout(t._h);
   t._h = setTimeout(() => t.style.display = 'none', 2000);
 }
+async function api(path, method = 'GET', body = null) {
+  const opt = { method, headers: { Authorization: 'Bearer ' + cfg.token } };
+  if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch(cfg.baseUrl + path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+  return data;
+}
 window.smsync.onCopied(() => {
   if (pendingBtn) { const b = pendingBtn; pendingBtn = null; const o = b.textContent;
     b.textContent = '✓ 已复制'; setTimeout(() => b.textContent = o, 1200); }
 });
 function doCopy(btn, text) { pendingBtn = btn; window.smsync.copy(text); }
 
+// ---- tabs ----
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tabpage').forEach(p => p.classList.toggle('active', p.id === b.dataset.tab));
+  if (b.dataset.tab === 'tabCalls') loadCalls();
+  if (b.dataset.tab === 'tabSend') loadOutbox();
+});
+
+// ---- sms tab ----
 function filtered() {
   if (!keyword) return items;
   const k = keyword.toLowerCase();
@@ -180,16 +275,8 @@ function select(id) {
 }
 async function deleteSms(id) {
   if (!confirm('确定删除这条短信吗？')) return;
-  try {
-    const r = await fetch(cfg.baseUrl + '/api/v1/sms/' + id, {
-      method: 'DELETE',
-      headers: { Authorization: 'Bearer ' + cfg.token },
-    });
-    if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
-    removeLocal(id);
-  } catch (e) {
-    toast('删除失败：' + e.message, false);
-  }
+  try { await api('/api/v1/sms/' + id, 'DELETE'); removeLocal(id); }
+  catch (e) { toast('删除失败：' + e.message, false); }
 }
 function removeLocal(id) {
   items = items.filter(x => x.id !== id);
@@ -201,19 +288,129 @@ function removeLocal(id) {
 }
 async function loadHistory() {
   try {
-    const r = await fetch(cfg.baseUrl + '/api/v1/sms?limit=100',
-      { headers: { Authorization: 'Bearer ' + cfg.token } });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    items = (await r.json()).items;
+    const data = await api('/api/v1/sms?limit=100');
+    items = data.items;
     renderList();
   } catch (e) {
     $('list').innerHTML = `<div class="empty" style="margin-top:40px">加载失败：${esc(e.message)}</div>`;
   }
 }
 
+// ---- calls tab ----
+const CALL_ICONS = { in: '📲', out: '📤' };
+const CALL_STATUS = { ringing: '响铃', dialing: '拨号中', alerting: '对方响铃',
+                      active: '通话中', missed: '未接', ended: '已结束', failed: '失败' };
+async function loadCalls() {
+  try {
+    const data = await api('/api/v1/calls?limit=100');
+    calls = data.items;
+    renderCalls();
+  } catch (e) {
+    $('callList').innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+  }
+}
+function renderCalls() {
+  $('callList').innerHTML = calls.map(c => {
+    const missed = c.status === 'missed' || c.status === 'failed';
+    const dur = c.duration != null ? `${c.duration}s` : (CALL_STATUS[c.status] || c.status);
+    return `<div class="call">
+      <span class="ico">${CALL_ICONS[c.direction] || '📞'}</span>
+      <span class="num ${missed ? 'missed' : ''}">${esc(c.number || '未知号码')}</span>
+      ${c.recording_file ? `<button class="recbtn" data-id="${c.id}">▶ 录音</button>` : ''}
+      <span class="meta">${esc(fmt(c.started_at || c.created_at))}<br>${esc(dur)}</span>
+    </div>`;
+  }).join('') || '<div class="empty">暂无通话记录</div>';
+  document.querySelectorAll('.recbtn').forEach(b => b.onclick = () => playRecording(b));
+}
+async function playRecording(btn) {
+  if (btn.nextSibling && btn.nextSibling.tagName === 'AUDIO') { btn.nextSibling.remove(); btn.textContent = '▶ 录音'; return; }
+  btn.textContent = '加载中…';
+  try {
+    const r = await fetch(`${cfg.baseUrl}/api/v1/calls/${btn.dataset.id}/recording`,
+      { headers: { Authorization: 'Bearer ' + cfg.token } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const url = URL.createObjectURL(await r.blob());
+    const audio = document.createElement('audio');
+    audio.controls = true; audio.autoplay = true; audio.src = url;
+    btn.after(audio);
+    btn.textContent = '收起';
+  } catch (e) { btn.textContent = '▶ 录音'; toast('录音加载失败', false); }
+}
+function updateActiveBar() {
+  if (activeCall && ['ringing', 'dialing', 'alerting', 'active'].includes(activeCall.status)) {
+    $('actbar').style.display = 'flex';
+    $('actNum').textContent = activeCall.number || '未知号码';
+    $('actSt').textContent = CALL_STATUS[activeCall.status] || activeCall.status;
+    $('actAnswer').style.display = activeCall.status === 'ringing' ? '' : 'none';
+  } else {
+    $('actbar').style.display = 'none';
+  }
+}
+$('actAnswer').onclick = async () => {
+  try { await api('/api/v1/calls/answer', 'POST'); } catch (e) { toast(e.message, false); }
+};
+$('actHangup').onclick = async () => {
+  try { await api('/api/v1/calls/hangup', 'POST'); } catch (e) { toast(e.message, false); }
+};
+$('dialBtn').onclick = async () => {
+  const num = $('dialNum').value.trim();
+  if (!num) return;
+  try { await api('/api/v1/calls/dial', 'POST', { number: num }); $('dialNum').value = ''; }
+  catch (e) { toast('拨号失败：' + e.message, false); }
+};
+function onCallEvent(c) {
+  if (['ringing', 'dialing', 'alerting', 'active'].includes(c.status)) activeCall = c;
+  else if (activeCall && activeCall.id === c.id) activeCall = null;
+  updateActiveBar();
+  const i = calls.findIndex(x => x.id === c.id);
+  if (i >= 0) calls[i] = c; else calls.unshift(c);
+  renderCalls();
+}
+
+// ---- send tab ----
+$('sendBtn').onclick = async () => {
+  const to = $('sendTo').value.trim(), text = $('sendText').value.trim();
+  if (!to || !text) return;
+  $('sendBtn').disabled = true;
+  try {
+    await api('/api/v1/sms/send', 'POST', { to, text });
+    toast('已发送');
+    $('sendText').value = '';
+  } catch (e) { toast('发送失败：' + e.message, false); }
+  $('sendBtn').disabled = false;
+  loadOutbox();
+};
+async function loadOutbox() {
+  try {
+    const data = await api('/api/v1/sms/outbox/list?limit=50');
+    outbox = data.items;
+    renderOutbox();
+  } catch (e) { /* leave list as-is */ }
+}
+function renderOutbox() {
+  $('outList').innerHTML = outbox.map(o => {
+    const [cls, label] = o.status === 'sent' ? ['st-ok', '✓ 已发送']
+      : o.status === 'failed' ? ['st-bad', '✗ 失败' + (o.error ? '：' + o.error : '')]
+      : ['st-wait', '… 发送中'];
+    return `<div class="outitem">
+      <span class="tt">${esc(fmt(o.created_at))}</span>
+      <span class="to">${esc(o.recipient)}</span> <span class="${cls}">${esc(label)}</span>
+      <div class="txt">${esc(o.text)}</div>
+    </div>`;
+  }).join('') || '<div class="empty">还没有发送记录</div>';
+}
+function onSmsSent(row) {
+  const i = outbox.findIndex(x => x.id === row.id);
+  if (i >= 0) outbox[i] = row; else outbox.unshift(row);
+  renderOutbox();
+}
+
 // ---- toolbar ----
 $('search').oninput = e => { keyword = e.target.value.trim(); renderList(); };
-$('refreshBtn').onclick = async () => { cfg = await window.smsync.getConfig(); loadHistory(); };
+$('refreshBtn').onclick = async () => {
+  cfg = await window.smsync.getConfig();
+  loadHistory(); loadCalls(); loadOutbox();
+};
 $('latestCodeBtn').onclick = e => {
   for (const it of items) {
     const code = extractCode(it.text || '');
@@ -251,14 +448,21 @@ $('sSave').onclick = async () => {
 };
 window.smsync.onShowSettings(openSettings);
 
+// ---- realtime events ----
 window.smsync.onSms(({ sms }) => {
   if (!items.some(x => x.id === sms.id)) { items.unshift(sms); renderList(); }
 });
 window.smsync.onDeleted(({ id }) => removeLocal(id));
+window.smsync.onCallEvent(onCallEvent);
+window.smsync.onSmsSent(onSmsSent);
+window.smsync.onAgentStatus(s => {
+  $('agentState').textContent = s.online ? '模块在线' : '模块离线';
+  $('agentState').classList.toggle('on', !!s.online);
+});
 window.smsync.onStatus(async s => {
   $('dot').classList.toggle('on', s.connected);
   $('domain').textContent = s.domain + (s.connected ? '' : '（重连中…）');
-  if (s.connected) { cfg = await window.smsync.getConfig(); loadHistory(); }
+  if (s.connected) { cfg = await window.smsync.getConfig(); loadHistory(); loadCalls(); }
 });
 (async () => {
   cfg = await window.smsync.getConfig();

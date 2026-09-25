@@ -28,8 +28,14 @@ EC20 (COM9)                       服务器 (Docker)                        客�
 │   ├── static/         #   网页客户端（手机/PC 通用）
 │   ├── Dockerfile
 │   └── .token          #   本地运行时自动生成的访问令牌
+├── agent_rpi/          # 树莓派采集端：SMS 收发 + 语音通话控制 + 通话录音
+│   ├── agent.py        #   主程序（短信/来电监听/指令执行/断网队列）
+│   ├── voice.py        #   通话状态机（RING/CLIP/CLCC 驱动）
+│   ├── audio.py        #   通话录音（arecord/ALSA）
+│   ├── uplink.py       #   WS 下行指令通道（拨号/接听/挂断/发短信）
+│   └── setup.md        #   树莓派接线（PCM↔I2S）、VoLTE、systemd 部署指南
 ├── client_electron/    # Electron 桌面客户端（推荐）
-│   └── src/            #   弹窗 / 主窗口 / 双域名故障转移 / 设置
+│   └── src/            #   弹窗 / 主窗口(短信/通话/发短信) / 双域名故障转移 / 设置
 ├── client_pc/          # Python 轻量通知器（无界面，系统通知弹窗）
 ├── docker-compose.yml  # 服务器一键部署
 ├── deploy.sh           # git pull + 重新部署（供 1Panel 计划任务调用）
@@ -111,7 +117,22 @@ docker compose up -d
 | GET | `/api/v1/sms?limit=&before_id=` | 分页拉取（倒序） |
 | GET | `/api/v1/sms/{id}` | 单条详情 |
 | DELETE | `/api/v1/sms/{id}` | 删除短信，并广播 `{"type":"delete","data":{"id":N}}` 让各客户端实时移除 |
-| WS | `/ws?token=` | 实时推送：新短信 `{"type":"sms",...}`、删除 `{"type":"delete",...}` |
+| POST | `/api/v1/sms/send` | 发短信 `{to, text}`（经 agent 下行执行，结果写入发件箱） |
+| GET | `/api/v1/sms/outbox/list` | 发件箱（sent/failed/pending） |
+| POST | `/api/v1/calls` | agent 上报通话事件（按 `client_msg_id` 幂等 upsert） |
+| GET | `/api/v1/calls` | 通话记录 |
+| POST | `/api/v1/calls/dial` `/answer` `/hangup` | 呼叫控制（转发 agent，agent 离线返回 503） |
+| POST/GET | `/api/v1/calls/{id}/recording` | 上传 / 播放通话录音（WAV） |
+| WS | `/ws?token=` | 客户端推送：`sms` / `delete` / `call` / `sms_sent` / `agent` |
+| WS | `/ws/agent?token=` | agent 指令通道（下行命令 + ack） |
+
+## 语音通话（树莓派）
+
+树莓派接 EC20（详见 `agent_rpi/setup.md`）：USB 提供短信收发、来电通知、拨号/接听/挂断控制；
+通话音频需 EC20 PCM 引脚接树莓派 I2S（接线表和配置在 setup.md），支持通话录音自动上传、
+客户端在线播放。远程实时通话（在 PC/手机上直接对话）需 WebRTC，为后续版本候选。
+
+> 前置条件：SIM 卡须开通语音 + VoLTE；纯流量/物联网卡只能收发短信。
 
 ## 开机自启（Windows，非 Docker 方式）
 

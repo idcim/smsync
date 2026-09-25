@@ -53,6 +53,7 @@ function applyConfig() {
 
 let mainWindow = null;
 let popup = null;
+let callPopup = null;
 let tray = null;
 let ws = null;
 let serverIndex = 0;
@@ -116,8 +117,46 @@ function showNext() {
     : send();
 }
 
-function openMainWindow(showSettings = false) {
-  if (mainWindow) {
+function showCallPopup(call) {
+  if (!callPopup) {
+    callPopup = new BrowserWindow({
+      width: 340,
+      height: 220,
+      frame: false,
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      show: false,
+      webPreferences: { preload: path.join(__dirname, "preload.js") },
+    });
+    callPopup.loadFile(path.join(__dirname, "callpopup.html"));
+    callPopup.on("closed", () => (callPopup = null));
+  }
+  const { workAreaSize, workArea } = screen.getPrimaryDisplay();
+  const [w, h] = callPopup.getSize();
+  callPopup.setPosition(
+    workArea.x + workAreaSize.width - w - 14,
+    workArea.y + workAreaSize.height - h - 14
+  );
+  const send = () => {
+    callPopup.webContents.send("call", { call });
+    callPopup.showInactive();
+  };
+  callPopup.webContents.isLoading()
+    ? callPopup.webContents.once("did-finish-load", send)
+    : send();
+}
+
+function handleCallEvent(call) {
+  if (mainWindow) mainWindow.webContents.send("call-event", call);
+  if (call.direction === "in" && call.status === "ringing") {
+    showCallPopup(call);
+  } else if (callPopup) {
+    callPopup.webContents.send("call-update", call);
+  }
+}
+
+function openMainWindow(showSettings = false) {  if (mainWindow) {
     mainWindow.show();
     mainWindow.focus();
     if (showSettings) mainWindow.webContents.send("show-settings");
@@ -186,6 +225,12 @@ function connect() {
       if (mainWindow) mainWindow.webContents.send("sms", { sms: msg.data });
     } else if (msg.type === "delete") {
       if (mainWindow) mainWindow.webContents.send("sms-deleted", { id: msg.data.id });
+    } else if (msg.type === "call") {
+      handleCallEvent(msg.data);
+    } else if (msg.type === "sms_sent") {
+      if (mainWindow) mainWindow.webContents.send("sms-sent", msg.data);
+    } else if (msg.type === "agent") {
+      if (mainWindow) mainWindow.webContents.send("agent-status", msg.data);
     }
   });
   const onLost = () => {
