@@ -74,9 +74,27 @@ if [[ -n "$VOL" ]]; then
 fi
 
 log "deploying ${REMOTE:0:8} (running: ${RUNNING:-<none>}) ..."
-if GIT_COMMIT="$REMOTE" "${DC[@]}" up -d --build --remove-orphans; then
-  printf '%s\n' "$REMOTE" > "$MARKER.tmp" && mv -f "$MARKER.tmp" "$MARKER"
-  log "deploy finished (${REMOTE:0:8})"
-else
+if ! GIT_COMMIT="$REMOTE" "${DC[@]}" up -d --build --remove-orphans; then
   die "docker compose up failed, will retry next round"
 fi
+
+# ---------- 健康检查：应用真正可服务才写标记、报成功 ----------
+log "waiting for health check ..."
+healthy=false
+for _ in $(seq 1 30); do
+  # 从容器内部探测，不依赖宿主机端口/防火墙；/api/v1/health 无需鉴权
+  if docker exec "$CONTAINER" python -c \
+      "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health',timeout=3)" \
+      >/dev/null 2>&1; then
+    healthy=true
+    break
+  fi
+  sleep 2
+done
+
+if [[ "$healthy" != "true" ]]; then
+  die "health check failed after 60s, marker NOT written (will retry next round); inspect with: docker logs $CONTAINER"
+fi
+
+printf '%s\n' "$REMOTE" > "$MARKER.tmp" && mv -f "$MARKER.tmp" "$MARKER"
+log "deploy finished, health check passed (${REMOTE:0:8})"
