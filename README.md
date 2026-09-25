@@ -157,6 +157,18 @@ schtasks /create /tn SMSyncServer /tr "cmd /c cd /d D:\DEV_AI\smsync\server && C
 
 采集端同理换成 `cmd /c cd /d D:\DEV_AI\smsync\agent && python.exe agent.py`。
 
+## 安全设计
+
+- **鉴权**：所有 API（除 `/api/v1/health`）与两个 WS 通道都要求 token，比较用常数时间算法（防计时侧信道）。token 是 192 位随机串，永远不要提交进 git
+- **传输**：token 在 HTTP 头与 WS 查询参数里明文传输，**公网部署必须套 HTTPS**（1Panel 反代 + SSL），否则 token 与短信内容会被窃听
+- **AT 指令注入**：拨号/发短信的号码在服务端做白名单校验（仅 `0-9+*#,`，≤20 位），非法输入 422 拒绝，到不了 modem
+- **注入与 XSS**：数据库全部参数化查询；PWA 与 Electron 界面渲染短信/号码统一转义（`esc()` / `textContent`）
+- **输入限制**：短信正文 ≤5000 字符、发送正文 ≤2000、录音上传 ≤25MB、通话事件的 direction/status 为枚举白名单
+- **CORS**：页面与 API 同源，未放开任何跨域
+- **容器**：非 root 用户（uid 10001）运行、根文件系统只读、drop 全部 capabilities、no-new-privileges；`.dockerignore` 排除 `.token` 与数据库文件
+- **Electron**：渲染进程 `sandbox + contextIsolation + 禁用 nodeIntegration`，只经 contextBridge 暴露少量 IPC；禁止新开窗口与页面导航
+- **响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
+
 ## 已知限制
 
 - 超长拼接短信会按段分别上报（未做 UDH 重组）

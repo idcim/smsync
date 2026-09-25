@@ -93,6 +93,7 @@ cd /opt/smsync && ./deploy.sh
 ## 禁区与注意事项
 
 - 不要把 token、`.env`、`config.ini`、数据库文件写进代码或提交
+- 不要削弱安全控制：token 常数时间比较、号码白名单校验（防 AT 注入）、容器非 root + 只读 rootfs、Electron sandbox——任何改动都要保留等效防护，详见 `README.md` 的"安全设计"一节
 - `deploy.sh` 在本地分支与远端分叉时报错退出（防误部署），**不要为它加强推/reset 逻辑**
 - 改 `agent_rpi/` 的音频/通话相关代码前，先读 `agent_rpi/setup.md` 了解硬件接线（EC20 PCM ↔ 树莓派 I2S）和 VoLTE 前提
 - 已知限制：超长拼接短信未做 UDH 重组（按段分别上报）；网页端通知需页面保持打开

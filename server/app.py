@@ -1,57 +1,65 @@
 import asyncio
 import contextlib
 import json
+import secrets
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config import BASE_DIR, DB_PATH, RECORDINGS_DIR, TOKEN
 from db import Database, to_event
 
 app = FastAPI(title="SMSync", version="1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 所有页面与 API 同源（PWA 由本服务托管），无需放开 CORS；浏览器跨域默认拒绝
 db = Database(DB_PATH)
+
+MAX_RECORDING_BYTES = 25 * 1024 * 1024  # 通话录音上传上限 25MB
+PHONE_PATTERN = r"^[0-9+*#,]{1,20}$"    # 白名单字符，杜绝 AT 指令注入（agent 直接拼进 ATD）
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 class SmsIn(BaseModel):
-    sender: str
-    text: str
-    received_at: Optional[str] = None
-    client_msg_id: Optional[str] = None
+    sender: str = Field(max_length=100)
+    text: str = Field(max_length=5000)
+    received_at: Optional[str] = Field(default=None, max_length=40)
+    client_msg_id: Optional[str] = Field(default=None, max_length=64)
 
 
 class SmsSendIn(BaseModel):
-    to: str
-    text: str
+    to: str = Field(pattern=PHONE_PATTERN)
+    text: str = Field(min_length=1, max_length=2000)
 
 
 class CallEventIn(BaseModel):
-    client_msg_id: str
-    direction: str  # "in" | "out"
-    number: str
-    status: str  # ringing / dialing / active / missed / ended / failed
-    started_at: Optional[str] = None
-    answered_at: Optional[str] = None
-    ended_at: Optional[str] = None
-    duration: Optional[int] = None
+    client_msg_id: str = Field(max_length=64)
+    direction: Literal["in", "out"]
+    number: str = Field(max_length=32)
+    status: Literal["ringing", "dialing", "alerting", "active", "missed", "ended", "failed"]
+    started_at: Optional[str] = Field(default=None, max_length=40)
+    answered_at: Optional[str] = Field(default=None, max_length=40)
+    ended_at: Optional[str] = Field(default=None, max_length=40)
+    duration: Optional[int] = Field(default=None, ge=0)
 
 
 class DialIn(BaseModel):
-    number: str
+    number: str = Field(pattern=PHONE_PATTERN)
 
 
 def check_token(authorization: str = Header(default="")):
-    if authorization != f"Bearer {TOKEN}":
+    # 常数时间比较，防计时侧信道
+    if not secrets.compare_digest(authorization, f"Bearer {TOKEN}"):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
@@ -255,9 +263,14 @@ async def hangup_call():
 async def upload_recording(call_id: int, request: Request):
     if not db.get_call(call_id):
         raise HTTPException(status_code=404, detail="not found")
+    if request.headers.get("content-length"):
+        if int(request.headers["content-length"]) > MAX_RECORDING_BYTES:
+            raise HTTPException(status_code=413, detail="recording too large")
     data = await request.body()
     if not data:
         raise HTTPException(status_code=400, detail="empty body")
+    if len(data) > MAX_RECORDING_BYTES:
+        raise HTTPException(status_code=413, detail="recording too large")
     filename = f"call_{call_id}.wav"
     (RECORDINGS_DIR / filename).write_bytes(data)
     row = db.set_recording(call_id, filename)
@@ -278,7 +291,7 @@ def get_recording(call_id: int):
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket, token: str = ""):
-    if token != TOKEN:
+    if not secrets.compare_digest(token, TOKEN):
         await websocket.close(code=4401)
         return
     await websocket.accept()
@@ -295,7 +308,7 @@ async def ws(websocket: WebSocket, token: str = ""):
 
 @app.websocket("/ws/agent")
 async def ws_agent(websocket: WebSocket, token: str = ""):
-    if token != TOKEN:
+    if not secrets.compare_digest(token, TOKEN):
         await websocket.close(code=4401)
         return
     await websocket.accept()

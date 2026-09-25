@@ -69,6 +69,19 @@ const currentName = () => effServers[serverIndex].http.replace(/^\w+:\/\//, "");
 
 // ---------------------------------------------------------------- windows
 
+// 渲染进程最小权限：只用 contextBridge 暴露的 IPC，禁 Node、禁新开窗口/导航
+const SECURE_WEBPREFS = {
+  preload: path.join(__dirname, "preload.js"),
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+};
+
+function hardenWindow(win) {
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (e) => e.preventDefault());
+}
+
 function createPopup() {
   popup = new BrowserWindow({
     width: 380,
@@ -79,8 +92,9 @@ function createPopup() {
     skipTaskbar: true,
     show: false,
     focusable: true,
-    webPreferences: { preload: path.join(__dirname, "preload.js") },
+    webPreferences: { ...SECURE_WEBPREFS },
   });
+  hardenWindow(popup);
   popup.loadFile(path.join(__dirname, "popup.html"));
   popup.on("closed", () => {
     popup = null;
@@ -127,8 +141,9 @@ function showCallPopup(call) {
       alwaysOnTop: true,
       skipTaskbar: true,
       show: false,
-      webPreferences: { preload: path.join(__dirname, "preload.js") },
+      webPreferences: { ...SECURE_WEBPREFS },
     });
+    hardenWindow(callPopup);
     callPopup.loadFile(path.join(__dirname, "callpopup.html"));
     callPopup.on("closed", () => (callPopup = null));
   }
@@ -169,8 +184,9 @@ function openMainWindow(showSettings = false) {  if (mainWindow) {
     minHeight: 420,
     title: "SMSync",
     backgroundColor: "#0d1117",
-    webPreferences: { preload: path.join(__dirname, "preload.js") },
+    webPreferences: { ...SECURE_WEBPREFS },
   });
+  hardenWindow(mainWindow);
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   if (showSettings) {
     mainWindow.webContents.once("did-finish-load", () =>
