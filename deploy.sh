@@ -65,6 +65,14 @@ if [[ "$LOCAL" != "$REMOTE" ]]; then
 fi
 
 # ---------- 部署（GIT_COMMIT 烤进镜像标签，供下轮比对） ----------
+# 旧版本容器曾以 root 运行，数据卷里文件的属主是 root；
+# 新版容器以 uid 10001 运行，部署前先修正卷属主（卷不存在时跳过，compose 会按镜像属主初始化）
+VOL=$(docker volume ls -q --filter "label=com.docker.compose.volume=smsync-data" 2>/dev/null | head -1 || true)
+if [[ -n "$VOL" ]]; then
+  docker run --rm -v "$VOL:/data" alpine sh -c "chown -R 10001:10001 /data" \
+    || log "warn: chown data volume failed"
+fi
+
 log "deploying ${REMOTE:0:8} (running: ${RUNNING:-<none>}) ..."
 if GIT_COMMIT="$REMOTE" "${DC[@]}" up -d --build --remove-orphans; then
   printf '%s\n' "$REMOTE" > "$MARKER.tmp" && mv -f "$MARKER.tmp" "$MARKER"
