@@ -10,6 +10,16 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
 MARKER=.last_deployed
 
+# 兼容 docker compose v2 插件与老的 docker-compose 独立命令
+if docker compose version >/dev/null 2>&1; then
+  DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  DC="docker-compose"
+else
+  log "ERROR: docker compose not found"
+  exit 1
+fi
+
 git fetch --quiet origin || { log "git fetch failed (network?), skip this round"; exit 0; }
 
 LOCAL=$(git rev-parse HEAD)
@@ -34,8 +44,19 @@ fi
 HEAD=$(git rev-parse HEAD)
 LAST=$(cat "$MARKER" 2>/dev/null || true)
 
+# 容器是否在跑：先取容器 ID 再逐个 inspect，不依赖 compose ps 的 --status 参数（旧版不支持）
+container_running() {
+  local id
+  for id in $($DC ps -q 2>/dev/null); do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$id" 2>/dev/null)" = "true" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # 三条件都满足才跳过：提交没变化、上次部署成功过、容器还在跑
-if [ "$HEAD" = "$LAST" ] && docker compose ps --status running -q 2>/dev/null | grep -q .; then
+if [ "$HEAD" = "$LAST" ] && container_running; then
   log "already deployed ${HEAD:0:8}, skip"
   exit 0
 fi
@@ -45,6 +66,6 @@ if [ "$HEAD" != "$LAST" ]; then
 else
   log "container not running, redeploying ${HEAD:0:8} ..."
 fi
-docker compose up -d --build
+$DC up -d --build
 echo "$HEAD" > "$MARKER"
 log "deploy finished (${HEAD:0:8})"
