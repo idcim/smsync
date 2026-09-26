@@ -21,20 +21,26 @@ const base = require("./config");
 
 const DEFAULT_SETTINGS = {
   username: "", // empty -> fall back to env / .env
-  password: "", // empty -> fall back to env / .env
+  refreshToken: "", // 登录换取的刷新令牌；access token 过期后用它无状态续期
   domains: "", // comma separated, empty -> env / built-in defaults
   popupEnabled: true,
   soundEnabled: true,
   autoStart: false,
 };
 let settings = { ...DEFAULT_SETTINGS };
-let effToken = null; // 登录后拿到的 JWT，不再是静态 token
+let effToken = null; // 登录后拿到的 access token（JWT），只在内存不持久化
 let effUsername = base.username;
-let effPassword = base.password;
+// 一次性密码：来自设置面板输入或旧版 settings.json 迁移，用完即弃，绝不写盘
+let pendingPassword = null;
 let effServers = base.servers;
 let manualReconnect = false;
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
+
+function saveSettingsFile() {
+  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
+  fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+}
 
 function loadSettings() {
   try {
@@ -42,11 +48,16 @@ function loadSettings() {
   } catch {
     /* first run: keep defaults */
   }
+  // 旧版 settings.json 里可能存着密码：迁移成一次性凭据并从磁盘抹掉
+  if (settings.password) {
+    pendingPassword = settings.password;
+    delete settings.password;
+    saveSettingsFile();
+  }
 }
 
 function applyConfig() {
   effUsername = settings.username || base.username;
-  effPassword = settings.password || base.password;
   const doms = (settings.domains || "")
     .split(",")
     .map((d) => d.trim())
@@ -216,34 +227,60 @@ function scheduleReconnect(delayMs) {
   reconnectTimer = setTimeout(connect, delayMs);
 }
 
-// 用保存的用户名密码向当前服务器换 JWT；失败同样计入故障转移次数
+// 认证：优先用 refreshToken 无状态续期（软轮换，总是保存最新的）；
+// 没有（可用）refreshToken 才用一次性密码（设置面板输入 / 旧版迁移 / .env）走机器通道登录。
+// 失败同样计入故障转移次数
 let loginPromise = null;
 function login() {
   if (loginPromise) return loginPromise; // 避免并发重复登录
   loginPromise = (async () => {
     try {
-      const r = await fetch(`${currentBase()}/api/v1/auth/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: effUsername, password: effPassword }),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      effToken = data.access_token;
-      console.log(`login ok: ${currentName()} (${data.user?.username || effUsername})`);
-      return true;
-    } catch (e) {
-      effToken = null;
-      console.error(`login failed: ${currentName()} ${e.message}`);
-      failedAttempts += 1;
-      if (failedAttempts >= 3) {
-        serverIndex = (serverIndex + 1) % effServers.length;
-        failedAttempts = 0;
-        console.log(`failover -> ${currentName()}`);
+      if (settings.refreshToken) {
+        try {
+          const r = await fetch(`${currentBase()}/api/v1/auth/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: settings.refreshToken }),
+          });
+          if (r.ok) {
+            applyTokens(await r.json());
+            console.log(`token refreshed: ${currentName()}`);
+            return true;
+          }
+          if (r.status === 401) {
+            // refresh 也失效：清掉，落到下面的密码通道或等用户重新输密码
+            settings.refreshToken = "";
+            saveSettingsFile();
+            console.error("refresh token 失效 - 请在设置里重新输入密码");
+          } else {
+            throw new Error(`HTTP ${r.status}`);
+          }
+        } catch (e) {
+          return authFailed(e); // 网络错误等：保留 refreshToken，下次再试
+        }
       }
-      // WS 还连着时（relogin 场景）不重复建连，只等下次自然重连
-      if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect(3000);
-      return false;
+      // 没有（可用）refreshToken：用一次性密码登录换一对令牌
+      const password = pendingPassword || base.password;
+      if (!effUsername || !password) {
+        console.error("需要密码登录 - 请在设置里输入密码，或在 .env 配置 SMSYNC_PASSWORD");
+        if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect(15000);
+        return false;
+      }
+      try {
+        const r = await fetch(`${currentBase()}/api/v1/auth/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: effUsername, password }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        applyTokens(data);
+        pendingPassword = null; // 密码只用一次，用完即弃
+        console.log(`login ok: ${currentName()} (${data.user?.username || effUsername})`);
+        return true;
+      } catch (e) {
+        return authFailed(e);
+      }
     } finally {
       loginPromise = null;
     }
@@ -251,14 +288,36 @@ function login() {
   return loginPromise;
 }
 
+// 保存新的一对令牌：access token 只在内存，refreshToken 持久化到 settings.json
+function applyTokens(data) {
+  effToken = data.access_token;
+  if (data.refresh_token) settings.refreshToken = data.refresh_token;
+  saveSettingsFile();
+}
+
+// 认证失败统一处理：清 access token、计入故障转移、安排重试
+function authFailed(e) {
+  effToken = null;
+  console.error(`auth failed: ${currentName()} ${e.message}`);
+  failedAttempts += 1;
+  if (failedAttempts >= 3) {
+    serverIndex = (serverIndex + 1) % effServers.length;
+    failedAttempts = 0;
+    console.log(`failover -> ${currentName()}`);
+  }
+  // WS 还连着时（relogin 场景）不重复建连，只等下次自然重连
+  if (!ws || ws.readyState !== WebSocket.OPEN) scheduleReconnect(3000);
+  return false;
+}
+
 async function connect() {
   if (!effToken) {
-    if (!effUsername || !effPassword) {
-      console.error("SMSYNC_USERNAME/SMSYNC_PASSWORD not set - open settings or edit .env");
+    if (!settings.refreshToken && !pendingPassword && !base.password) {
+      console.error("no credentials - open settings and enter password, or edit .env");
       scheduleReconnect(15000);
       return;
     }
-    // 没有 JWT 先登录；失败时 login() 内部已安排重试/故障转移
+    // 没有 access token 先走认证（refresh 续期或密码登录）；失败时 login() 内部已安排重试/故障转移
     if (!(await login())) return;
   }
   try {
@@ -369,8 +428,8 @@ ipcMain.handle("copy-text", (event, text) => {
 });
 
 ipcMain.handle("get-config", async () => {
-  // renderer 拿配置去发 REST 请求，确保已有 JWT
-  if (!effToken && effUsername && effPassword) await login();
+  // renderer 拿配置去发 REST 请求，确保已有 access token
+  if (!effToken) await login();
   return {
     baseUrl: currentBase(),
     token: effToken,
@@ -380,7 +439,7 @@ ipcMain.handle("get-config", async () => {
   };
 });
 
-// renderer 的 REST 请求遇到 401 时调用：重新登录并返回新 JWT
+// renderer 的 REST 请求遇到 401 时调用：走 refresh 续期，失败返回 null
 ipcMain.handle("relogin", async () => {
   effToken = null;
   return (await login()) ? effToken : null;
@@ -390,18 +449,27 @@ ipcMain.on("open-releases", () => {
   shell.openExternal("https://github.com/idcim/smsync/releases");
 });
 
-ipcMain.handle("get-settings", () => ({
-  ...settings,
-  // show what will actually be used, so the user can tell env fallback apart
-  effectiveDomains: effServers.map((s) => s.http.replace(/^\w+:\/\//, "")).join(", "),
-}));
+ipcMain.handle("get-settings", () => {
+  // refreshToken 是敏感凭据，不下发给渲染进程
+  const { refreshToken, ...rest } = settings;
+  return {
+    ...rest,
+    // show what will actually be used, so the user can tell env fallback apart
+    effectiveDomains: effServers.map((s) => s.http.replace(/^\w+:\/\//, "")).join(", "),
+  };
+});
 
 ipcMain.handle("save-settings", (_e, patch) => {
+  // 密码只做一次性登录凭据，不进 DEFAULT_SETTINGS、不写盘
+  const oneShot = typeof patch.password === "string" && patch.password ? patch.password : null;
+  const userChanged = "username" in patch && patch.username !== settings.username;
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     if (key in patch) settings[key] = patch[key];
   }
-  fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-  fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+  // 换了账号或输入了新密码：旧 refreshToken 作废，改用密码重新登录
+  if (oneShot || userChanged) settings.refreshToken = "";
+  if (oneShot) pendingPassword = oneShot;
+  saveSettingsFile();
   applyConfig();
   app.setLoginItemSettings({ openAtLogin: Boolean(settings.autoStart) });
   reconnect();

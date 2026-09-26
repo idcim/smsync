@@ -21,7 +21,11 @@ from config import DATA_DIR
 
 _PBKDF2_ITER = 100_000
 ALGORITHM = "HS256"
-EXPIRE_HOURS = int(os.environ.get("SMSYNC_JWT_EXPIRE_HOURS", str(24 * 7)))
+# access token 短效（默认 12 小时），refresh token 长效（默认 30 天）；
+# 客户端只保存 token，access 过期后用 refresh 换新的一对（无状态）
+ACCESS_HOURS = int(os.environ.get("SMSYNC_JWT_ACCESS_HOURS", "12"))
+REFRESH_DAYS = int(os.environ.get("SMSYNC_JWT_REFRESH_DAYS", "30"))
+EXPIRE_HOURS = ACCESS_HOURS  # 兼容旧引用
 
 # 放数据目录而非代码目录：Docker 里代码目录是只读 rootfs，数据目录在卷上
 _secret_file = DATA_DIR / ".jwt_secret"
@@ -62,14 +66,17 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ---- JWT ----
 
-def make_token(user: dict) -> str:
+def make_token(user: dict, kind: str = "access") -> str:
+    """kind: "access"（业务请求用，短效） | "refresh"（仅用于换新 token，长效）"""
     now = int(time.time())
+    ttl = ACCESS_HOURS * 3600 if kind == "access" else REFRESH_DAYS * 86400
     payload = {
         "sub": str(user["id"]),
         "username": user["username"],
         "role": user["role"],
+        "typ": kind,
         "iat": now,
-        "exp": now + EXPIRE_HOURS * 3600,
+        "exp": now + ttl,
     }
     return jwt.encode(payload, SECRET, algorithm=ALGORITHM)
 

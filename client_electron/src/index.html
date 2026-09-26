@@ -175,8 +175,9 @@
       <input type="text" id="sUsername" placeholder="SMSYNC_USERNAME" autocomplete="off">
     </div>
     <div class="field">
-      <label>密码（留空则使用 .env 里的 SMSYNC_PASSWORD）</label>
-      <input type="password" id="sPassword" placeholder="SMSYNC_PASSWORD">
+      <label>密码（留空则不修改，仅首次登录用）</label>
+      <input type="password" id="sPassword" placeholder="留空则不修改 / 仅首次登录用">
+      <div class="hint">密码不保存，仅用于换取令牌，之后用刷新令牌自动续期</div>
     </div>
     <div class="field">
       <label>服务器域名（逗号分隔，前者优先，留空用默认）</label>
@@ -453,7 +454,7 @@ $('settingsBtn').onclick = openSettings;
 async function openSettings() {
   const s = await window.smsync.getSettings();
   $('sUsername').value = s.username || '';
-  $('sPassword').value = s.password || '';
+  $('sPassword').value = ''; // 密码不落盘，打开设置时始终为空
   $('sDomains').value = s.domains || '';
   $('sEffective').textContent = '当前生效：' + (s.effectiveDomains || '（无）');
   $('sPopup').checked = !!s.popupEnabled;
@@ -472,6 +473,7 @@ $('sSave').onclick = async () => {
     soundEnabled: $('sSound').checked,
     autoStart: $('sAutoStart').checked,
   });
+  $('sPassword').value = ''; // 密码已交给主进程一次性使用，立即清空
   $('mask').classList.remove('show');
   toast('已保存，正在重连…');
   setTimeout(async () => { setCfg(await window.smsync.getConfig()); loadHistory(); }, 800);

@@ -85,13 +85,17 @@ async function onSubmit() {
   }
   loading.value = true
   try {
-    const { data } = await api.post('/auth/login', {
-      username: form.username,
-      password: form.password,
-      captcha_id: captchaId.value,
-      captcha_text: form.captcha_text
-    })
-    setAuth(data.access_token, data.user)
+    const { data } = await api.post(
+      '/auth/login',
+      {
+        username: form.username,
+        password: form.password,
+        captcha_id: captchaId.value,
+        captcha_text: form.captcha_text
+      },
+      { _noRefresh: true } // 登录失败由本页自行处理，不走 token 刷新
+    )
+    setAuth(data.access_token, data.refresh_token, data.user)
     router.push('/')
   } catch (e) {
     const status = e.response?.status

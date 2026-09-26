@@ -125,14 +125,39 @@ function fmt(iso) {
   const d = new Date(iso);
   return isNaN(d) ? iso : d.toLocaleString('zh-CN', {hour12: false});
 }
-async function api(path, method = 'GET', body = null) {
+async function api(path, method = 'GET', body = null, retried = false) {
   const opt = {method, headers: {Authorization: 'Bearer ' + token}};
   if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(path, opt);
-  if (r.status === 401) { localStorage.removeItem('smsync_jwt'); location.reload(); throw new Error('401'); }
+  if (r.status === 401) {
+    // access token 过期：先尝试用 refresh token 换新的一对（无状态续期）
+    if (!retried && await refreshTokens()) return api(path, method, body, true);
+    localStorage.removeItem('smsync_jwt');
+    localStorage.removeItem('smsync_refresh');
+    location.reload();
+    throw new Error('401');
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
   return data;
+}
+
+// access(12h) 过期后用 refresh(30d) 换新 token 对；refresh 也失效才需重新登录
+async function refreshTokens() {
+  const rt = localStorage.getItem('smsync_refresh');
+  if (!rt) return false;
+  try {
+    const r = await fetch('/api/v1/auth/refresh', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: rt }),
+    });
+    if (!r.ok) return false;
+    const d = await r.json();
+    token = d.access_token;
+    localStorage.setItem('smsync_jwt', d.access_token);
+    localStorage.setItem('smsync_refresh', d.refresh_token);
+    return true;
+  } catch (e) { return false; }
 }
 
 // ---- tabs ----
@@ -297,8 +322,10 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
   ws.onopen = () => { $('dot').classList.add('on'); retryMs = 1000; };
-  ws.onclose = () => {
+  ws.onclose = async (ev) => {
     $('dot').classList.remove('on');
+    // 4401 = token 失效：先用 refresh token 续期再重连
+    if (ev.code === 4401) await refreshTokens();
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 30000);
   };
@@ -342,7 +369,8 @@ $('saveBtn').onclick = async () => {
       : r.status === 400 ? '验证码错误或已过期'
       : (d.detail || '登录失败'));
     token = d.access_token;
-    localStorage.setItem('smsync_jwt', token);
+    localStorage.setItem('smsync_jwt', d.access_token);
+    localStorage.setItem('smsync_refresh', d.refresh_token);
     start();
   } catch (e) {
     const el = $('loginErr');
@@ -354,6 +382,7 @@ $('saveBtn').onclick = async () => {
 };
 $('logoutBtn').onclick = () => {
   localStorage.removeItem('smsync_jwt');
+  localStorage.removeItem('smsync_refresh');
   location.reload();
 };
 $('more').onclick = () => oldestId && loadHistory(oldestId).catch(console.error);

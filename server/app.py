@@ -14,7 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from auth import (
+    ACCESS_HOURS,
     EXPIRE_HOURS,
+    REFRESH_DAYS,
     check_captcha,
     decode_token,
     hash_password,
@@ -96,11 +98,14 @@ class UserUpdateIn(BaseModel):
 
 # ---- 认证依赖 ----
 
-def _user_from_token(token: str) -> dict:
+def _user_from_token(token: str, kind: str = "access") -> dict:
     try:
         payload = decode_token(token)
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+    # typ 缺省按 access 处理（兼容旧版签发的 token）
+    if payload.get("typ", "access") != kind:
+        raise HTTPException(status_code=401, detail="wrong token type")
     user = db.get_user(int(payload["sub"]))
     if not user or user["disabled"]:
         raise HTTPException(status_code=401, detail="user disabled or deleted")
@@ -249,7 +254,7 @@ def health():
 # ---- auth & users ----
 
 def _issue_token(username: str, password: str, request: Request) -> dict:
-    """校验账号密码并签发 JWT；带登录限流。成功/失败都抛/返一致，不区分用户名或密码错。"""
+    """校验账号密码并签发 JWT 对；带登录限流。成功/失败都抛/返一致，不区分用户名或密码错。"""
     ip = request.client.host if request.client else "-"
     key, fails = _login_throttle(username, ip)
     user = db.get_user_by_username(username)
@@ -258,12 +263,30 @@ def _issue_token(username: str, password: str, request: Request) -> dict:
         _login_fails[key] = (fails, time.monotonic() + 60 if fails >= 5 else 0.0)
         raise HTTPException(status_code=401, detail="wrong username or password")
     _login_fails.pop(key, None)
+    return _token_pair(user)
+
+
+def _token_pair(user: dict) -> dict:
     return {
-        "access_token": make_token(user),
+        "access_token": make_token(user, "access"),
+        "refresh_token": make_token(user, "refresh"),
         "token_type": "bearer",
-        "expires_in": EXPIRE_HOURS * 3600,
+        "expires_in": ACCESS_HOURS * 3600,
+        "refresh_expires_in": REFRESH_DAYS * 86400,
         "user": public_user(user),
     }
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=4096)
+
+
+@app.post("/api/v1/auth/refresh")
+def refresh_token(payload: RefreshIn):
+    """用 refresh token 换新的一对 token（无状态刷新，旧 refresh 在到期前仍可用）。
+    客户端只保存 token、不保存密码；refresh 也失效时才需要重新输密码。"""
+    user = _user_from_token(payload.refresh_token, kind="refresh")
+    return _token_pair(user)
 
 
 @app.get("/api/v1/auth/captcha")
@@ -489,6 +512,8 @@ def get_recording(call_id: int):
 async def ws(websocket: WebSocket, token: str = ""):
     try:
         payload = decode_token(token)
+        if payload.get("typ", "access") != "access":
+            raise ValueError("wrong token type")
         user = db.get_user(int(payload["sub"]))
         if not user or user["disabled"]:
             raise ValueError("user gone")
@@ -511,6 +536,8 @@ async def ws(websocket: WebSocket, token: str = ""):
 async def ws_agent(websocket: WebSocket, token: str = ""):
     try:
         payload = decode_token(token)
+        if payload.get("typ", "access") != "access":
+            raise ValueError("wrong token type")
         user = db.get_user(int(payload["sub"]))
         if not user or user["disabled"]:
             raise ValueError("user gone")

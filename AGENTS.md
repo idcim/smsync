@@ -70,7 +70,7 @@ cd /opt/smsync && ./deploy.sh
 
 ## 配置与密钥规则
 
-- 认证为多用户 + JWT：客户端/采集端用管理后台注册的账号密码调 `/api/v1/auth/login` 换 JWT（默认 7 天），遇 401/WS 4401 自动重新登录
+- 认证为多用户 + JWT 双 token：access 12h + refresh 30d。客户端/采集端用账号密码换 token 对，遇 401/WS 4401 用 `/api/v1/auth/refresh` 无状态续期；**交互式客户端（Electron/PWA/管理后台）只存 token 不存密码**，headless 采集端（agent/agent_rpi/client_pc）仍在 config.ini 存账号密码
 - 所有 HTTP 接口（除 health/login）需 `Authorization: Bearer <JWT>`；WS 用 `?token=<JWT>` 查询参数
 - JWT 密钥：环境变量 `SMSYNC_JWT_SECRET` 或数据目录 `.jwt_secret`（首次自动生成）；admin 初始密码：`SMSYNC_ADMIN_PASSWORD` 或数据目录 `.admin_credentials`
 - 以下文件已 gitignore，**绝不提交**：`.env`、`client_electron/.env`、`server/.token`、`server/.jwt_secret`、`server/.admin_credentials`、`agent/config.ini`、`client_pc/config.ini`、`*.db`
