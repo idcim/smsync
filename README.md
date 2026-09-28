@@ -61,7 +61,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 浏览器打开 `http://服务器地址:8000/admin/`，用 admin 登录后可：
 
 - **用户管理**：注册新用户、重置密码、启用/禁用账号、删除用户、修改自己的密码。客户端（Electron/PWA/通知器）用这里注册的账号登录
-- **设备管理**：创建采集端设备并生成**设备码**（`smsk_` 开头，只在创建时显示一次，请立即复制）、启用/禁用、重命名、删除。插 EC20 的采集端（Windows agent / 树莓派）用设备码上线，不占用用户账号
+- **设备管理**：创建采集端设备并生成**设备码**（`smsk_` 开头）、启用/禁用、重命名、删除。设备码在设备**首次上线前可在列表随时查看复制**；设备一旦用码认证成功，服务端自动清除明文，列表显示"已使用，已隐藏"。插 EC20 的采集端（Windows agent / 树莓派）用设备码上线，不占用用户账号
 
 - 后端改造源码在 `admin/`（Vue 3 + Element Plus + Vite），改动后 `cd admin && npm install && npm run build` 重新构建到 `server/static/admin/`
 - 普通用户（role=user）可登录各客户端收发查看，但没有用户/设备管理权限
@@ -138,7 +138,7 @@ docker compose up -d
 | POST | `/api/v1/auth/token` | 机器客户端登录 `{username, password}`（免验证码，同样限流） |
 | POST | `/api/v1/auth/device` | 采集端设备码登录 `{device_key}`（免验证码，限流；设备禁用即 401） |
 | POST | `/api/v1/auth/refresh` | 用 refresh_token 换新 token 对（无状态续期；客户端只存 token 不存密码） |
-| GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（仅 admin；**设备码只在创建响应里返回一次**，服务端只存哈希） |
+| GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（仅 admin；设备码仅设备未使用时可见，首次认证后服务端清除明文） |
 | PATCH/DELETE | `/api/v1/devices/{id}` | 重命名/启禁用、删除设备（仅 admin；禁用删除后其 token 立即失效） |
 | GET | `/api/v1/auth/me` | 当前登录用户信息 |
 | POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |

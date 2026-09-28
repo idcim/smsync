@@ -346,6 +346,7 @@ def device_login(payload: DeviceLoginIn, request: Request):
         _login_fails[key] = (fails, time.monotonic() + 60 if fails >= 5 else 0.0)
         raise HTTPException(status_code=401, detail="invalid device key")
     _login_fails.pop(key, None)
+    db.clear_device_key(dev["id"])  # 已使用：清除明文设备码，后台不再可见
     db.update_device(dev["id"], last_seen_at=_now_iso())
     return _token_pair({
         "id": dev["id"], "username": dev["name"], "role": "device", "device": True,
@@ -361,10 +362,9 @@ def list_devices(_: dict = Depends(require_admin)):
 
 @app.post("/api/v1/devices", status_code=201)
 def create_device(payload: DeviceCreateIn, _: dict = Depends(require_admin)):
-    # 设备码只在此处返回一次，服务端只存哈希
+    # 设备码在设备首次上线前可在列表中查看；设备认证成功后服务端清除明文
     device_key = "smsk_" + secrets.token_urlsafe(24)
-    dev = db.create_device(payload.name, _device_key_hash(device_key))
-    return {**dev, "device_key": device_key}
+    return db.create_device(payload.name, _device_key_hash(device_key), device_key)
 
 
 @app.patch("/api/v1/devices/{device_id}")

@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     key_hash TEXT UNIQUE NOT NULL,
+    device_key TEXT,
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_seen_at TEXT
@@ -73,6 +74,12 @@ class Database:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # 老库迁移：devices 表补 device_key 列（未使用的设备码临时明文存储，
+            # 设备首次认证成功后即清除）
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(devices)")}
+            if "device_key" not in cols:
+                self._conn.execute("ALTER TABLE devices ADD COLUMN device_key TEXT")
+                self._conn.commit()
 
     def insert_sms(
         self,
@@ -287,16 +294,16 @@ class Database:
 
     # ---- devices（采集端设备码认证） ----
 
-    def create_device(self, name: str, key_hash: str) -> dict:
+    def create_device(self, name: str, key_hash: str, device_key: str) -> dict:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO devices (name, key_hash, created_at) VALUES (?, ?, ?)",
-                (name, key_hash, now),
+                "INSERT INTO devices (name, key_hash, device_key, created_at) VALUES (?, ?, ?, ?)",
+                (name, key_hash, device_key, now),
             )
             self._conn.commit()
             return dict(self._conn.execute(
-                "SELECT id, name, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
+                "SELECT id, name, device_key, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
                 (cur.lastrowid,),
             ).fetchone())
 
@@ -318,9 +325,17 @@ class Database:
     def list_devices(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, disabled, created_at, last_seen_at FROM devices ORDER BY id"
+                "SELECT id, name, device_key, disabled, created_at, last_seen_at FROM devices ORDER BY id"
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def clear_device_key(self, device_id: int):
+        """设备首次认证成功后调用：清除明文设备码，此后后台不再可见。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE devices SET device_key = NULL WHERE id = ?", (device_id,)
+            )
+            self._conn.commit()
 
     def update_device(self, device_id: int, **fields) -> Optional[dict]:
         sets = {k: v for k, v in fields.items() if k in _DEVICE_FIELDS and v is not None}

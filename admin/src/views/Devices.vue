@@ -8,6 +8,17 @@
     <el-table :data="devices" v-loading="loading" border>
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="name" label="设备名称" />
+      <el-table-column label="设备码" min-width="220">
+        <template #default="{ row }">
+          <div v-if="row.device_key" class="key-cell">
+            <span class="key-inline">{{ row.device_key }}</span>
+            <el-button size="small" link type="primary" @click="copyText(row.device_key)">
+              复制
+            </el-button>
+          </div>
+          <span v-else class="key-hidden">已使用，已隐藏</span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.disabled ? 'warning' : 'success'">
@@ -62,14 +73,14 @@
       <el-alert
         type="warning"
         :closable="false"
-        title="设备码只显示这一次，请立即复制保存！关闭后将无法再查看。"
+        title="设备首次上线前可在本页面随时查看设备码；设备一旦使用，设备码将自动隐藏。"
         class="key-alert"
       />
       <div class="key-box">
         <span class="key-text">{{ createdKey }}</span>
       </div>
       <template #footer>
-        <el-button type="primary" @click="copyKey">
+        <el-button type="primary" @click="copyText(createdKey, true)">
           {{ copied ? '已复制 ✓' : '复制设备码' }}
         </el-button>
         <el-button @click="keyVisible = false">我已保存，关闭</el-button>
@@ -156,20 +167,20 @@ async function onCreate() {
   }
 }
 
-async function copyKey() {
+// 复制到剪贴板：优先 navigator.clipboard，非安全上下文用 execCommand 兜底
+async function copyText(text, markCopied = false) {
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(createdKey.value)
+      await navigator.clipboard.writeText(text)
     } else {
-      // 非安全上下文的兜底方案
       const ta = document.createElement('textarea')
-      ta.value = createdKey.value
+      ta.value = text
       document.body.appendChild(ta)
       ta.select()
       document.execCommand('copy')
       document.body.removeChild(ta)
     }
-    copied.value = true
+    if (markCopied) copied.value = true
     ElMessage.success('已复制到剪贴板')
   } catch {
     ElMessage.error('复制失败，请手动选择文本复制')
@@ -252,5 +263,19 @@ onMounted(loadDevices)
   font-weight: 600;
   color: #303133;
   user-select: all;
+}
+.key-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.key-inline {
+  font-family: monospace;
+  font-size: 13px;
+  user-select: all;
+}
+.key-hidden {
+  color: #909399;
+  font-size: 13px;
 }
 </style>
