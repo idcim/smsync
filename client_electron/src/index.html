@@ -302,12 +302,9 @@ async function loadDevices() {
   try {
     const data = await api('/api/v1/devices');
     devices = Array.isArray(data) ? data : (data.items || []);
-    // 还没收到 WS 事件时，用 last_seen_at 粗判在线（90 秒内有心跳）
-    const now = Date.now();
+    // 在线状态直接用接口返回的 online 字段（服务端权威）；WS agent 事件到了会再实时更新
     for (const d of devices) {
-      if (!(d.id in deviceOnline)) {
-        deviceOnline[d.id] = !!d.last_seen_at && now - new Date(d.last_seen_at).getTime() < 90000;
-      }
+      deviceOnline[d.id] = !!d.online;
     }
     renderDeviceSelects();
     renderAgentState();

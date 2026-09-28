@@ -3,7 +3,7 @@
 Run:  python agent.py   （打包后：smsync-agent.exe，驻留系统托盘）
 Conf: 读取顺序 %APPDATA%\\SMSyncAgent\\config.ini → exe 旁 config.ini → 内置 config.example.ini；
       设置窗口保存永远写 %APPDATA% 那份（Program Files 下 exe 目录不可写）。
-依赖：pyserial、pystray、Pillow（tkinter 为标准库）。
+依赖：pyserial、websocket-client、pystray、Pillow（tkinter 为标准库）。
 """
 
 import configparser
@@ -27,8 +27,9 @@ from PIL import Image, ImageDraw
 
 from modem import Modem
 from outbox import Outbox
+from uplink import Uplink
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后：数据与配置放 %APPDATA%（Program Files 不可写）
@@ -109,6 +110,8 @@ class Uploader:
         self._status = on_status
         self.token: str | None = None          # access token
         self.refresh_token: str | None = None
+        self._token_lock = threading.Lock()    # token 读写（REST 线程与 uplink 线程共享）
+        self._auth_lock = threading.Lock()     # 串行化 login/refresh，避免并发重复认证
 
     def _auth(self, path: str, body: dict) -> dict:
         req = urllib.request.Request(
@@ -121,41 +124,56 @@ class Uploader:
             return json.loads(resp.read())
 
     def _save_tokens(self, data: dict):
-        self.token = data["access_token"]
-        self.refresh_token = data.get("refresh_token")
+        with self._token_lock:
+            self.token = data["access_token"]
+            self.refresh_token = data.get("refresh_token")
+
+    def access_token(self) -> str:
+        """取当前 access token（没有则先设备码认证）；REST 与 WS uplink 共用。"""
+        with self._token_lock:
+            token = self.token
+        if token is None:
+            self.login()
+            with self._token_lock:
+                token = self.token
+        return token
 
     def login(self):
         """设备码认证；429 限流 / 401 设备码无效都等 60 秒再试（等待可被停止打断）。"""
-        while not self._stop.is_set():
-            try:
-                self._save_tokens(self._auth("/api/v1/auth/device", {"device_key": self.device_key}))
-                log.info("设备认证成功")
-                self._status("认证成功")
-                return
-            except urllib.error.HTTPError as e:
-                if e.code == 429:
-                    log.warning("认证被限流，60 秒后重试")
-                    self._status("认证被限流，60 秒后重试")
-                elif e.code == 401:
-                    # 设备码错误或设备被禁用：立即重试没意义，等用户在设置里改
-                    log.error("设备码无效或设备已禁用，60 秒后重试")
-                    self._status("错误：设备码无效或已禁用")
-                else:
-                    raise RuntimeError(f"device auth failed: HTTP {e.code}")
-            self._stop.wait(60)
-        raise RuntimeError("agent stopped")
+        with self._auth_lock:
+            while not self._stop.is_set():
+                try:
+                    self._save_tokens(self._auth("/api/v1/auth/device", {"device_key": self.device_key}))
+                    log.info("设备认证成功")
+                    self._status("认证成功")
+                    return
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        log.warning("认证被限流，60 秒后重试")
+                        self._status("认证被限流，60 秒后重试")
+                    elif e.code == 401:
+                        # 设备码错误或设备被禁用：立即重试没意义，等用户在设置里改
+                        log.error("设备码无效或设备已禁用，60 秒后重试")
+                        self._status("错误：设备码无效或已禁用")
+                    else:
+                        raise RuntimeError(f"device auth failed: HTTP {e.code}")
+                self._stop.wait(60)
+            raise RuntimeError("agent stopped")
 
     def refresh(self) -> bool:
         """refresh_token 无状态续期；失败返回 False（调用方再重新认证）。"""
-        if not self.refresh_token:
-            return False
-        try:
-            self._save_tokens(self._auth("/api/v1/auth/refresh", {"refresh_token": self.refresh_token}))
-            log.info("access token 已续期")
-            return True
-        except Exception as e:
-            log.warning("token refresh failed: %s", e)
-            return False
+        with self._auth_lock:
+            with self._token_lock:
+                refresh_token = self.refresh_token
+            if not refresh_token:
+                return False
+            try:
+                self._save_tokens(self._auth("/api/v1/auth/refresh", {"refresh_token": refresh_token}))
+                log.info("access token 已续期")
+                return True
+            except Exception as e:
+                log.warning("token refresh failed: %s", e)
+                return False
 
     def _post(self, payload: dict, timeout: float):
         req = urllib.request.Request(
@@ -163,7 +181,7 @@ class Uploader:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {self.access_token()}",
             },
             method="POST",
         )
@@ -172,8 +190,6 @@ class Uploader:
                 raise RuntimeError(f"server returned HTTP {resp.status}")
 
     def send(self, payload: dict, timeout: float = 10.0):
-        if self.token is None:
-            self.login()
         try:
             self._post(payload, timeout)
         except urllib.error.HTTPError as e:
@@ -194,12 +210,15 @@ class Agent:
             cfg.get("modem", "port", fallback="COM9"),
             cfg.getint("modem", "baudrate", fallback=115200),
         )
+        # 采集主循环与 uplink 指令线程共用串口，所有 modem 操作都要持锁
+        self.modem_lock = threading.Lock()
         self.uploader = Uploader(
             cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
             cfg.get("server", "device_key", fallback=""),
             self._stop,
             on_status,
         )
+        self.uplink = Uplink(self.uploader, self.execute_command, self._stop, on_status)
         outbox_name = cfg.get("agent", "outbox_db", fallback="outbox.db")
         outbox_path = Path(outbox_name)
         if not outbox_path.is_absolute():
@@ -211,17 +230,31 @@ class Agent:
         self._last_flush = 0.0
 
     def stop(self):
-        """让主循环尽快退出（关串口打断阻塞读，各处的 wait 也会被唤醒）。"""
+        """让主循环和 uplink 尽快退出（关串口/关 WS 打断阻塞，各处 wait 被唤醒）。"""
         self._stop.set()
         self.modem.close()
+        self.uplink.stop()
+
+    # ---- downlink commands -------------------------------------------------
+
+    def execute_command(self, action: str, params: dict) -> tuple[bool, str]:
+        if action == "send_sms":
+            with self.modem_lock:
+                ok, info = self.modem.send_sms(params["to"], params["text"])
+            return ok, "" if ok else info
+        if action in ("dial", "answer", "hangup"):
+            # Windows 采集端不支持通话控制
+            return False, "unsupported on windows agent"
+        return False, f"unknown action {action!r}"
 
     # ---- modem lifecycle -------------------------------------------------
 
     def connect(self):
         while not self._stop.is_set():
             try:
-                self.modem.open()
-                self.modem.init_basic()
+                with self.modem_lock:
+                    self.modem.open()
+                    self.modem.init_basic()
                 return
             except Exception as e:
                 log.error("modem connect failed (%s); retrying in 5s", e)
@@ -231,7 +264,9 @@ class Agent:
     def wait_for_sim(self):
         while not self._stop.is_set():
             try:
-                if self.modem.sim_ready():
+                with self.modem_lock:
+                    ready = self.modem.sim_ready()
+                if ready:
                     log.info("SIM ready")
                     return
             except Exception as e:
@@ -258,19 +293,22 @@ class Agent:
             self.outbox.enqueue(payload["client_msg_id"], payload)
 
     def process_index(self, index: int):
-        sms = self.modem.read_sms(index)
+        with self.modem_lock:
+            sms = self.modem.read_sms(index)
+            self.modem.delete_sms(index)
+        # Always delete: unparseable messages must not jam the SIM storage.
         if sms:
             self.handle_sms(sms)
-        # Always delete: unparseable messages must not jam the SIM storage.
-        self.modem.delete_sms(index)
 
     def drain_stored(self):
-        stored = self.modem.list_all()
+        with self.modem_lock:
+            stored = self.modem.list_all()
         if stored:
             log.info("draining %d stored message(s)", len(stored))
         for index, sms in stored:
             self.handle_sms(sms)
-            self.modem.delete_sms(index)
+            with self.modem_lock:
+                self.modem.delete_sms(index)
 
     def flush_outbox(self):
         due = self.outbox.due()
@@ -294,7 +332,8 @@ class Agent:
                 self.wait_for_sim()
                 if self._stop.is_set():
                     break
-                self.modem.init_sms()
+                with self.modem_lock:
+                    self.modem.init_sms()
                 self.drain_stored()
                 self.loop()
             except (serial.SerialException, OSError) as e:
@@ -317,7 +356,8 @@ class Agent:
         log.info("listening for incoming SMS...")
         self._status("已上线")
         while not self._stop.is_set():
-            urc = self.modem.poll_urc(timeout=1.0)
+            with self.modem_lock:
+                urc = self.modem.poll_urc(timeout=1.0)
             now = time.monotonic()
             if urc:
                 index = Modem.cmti_index(urc)
@@ -327,7 +367,8 @@ class Agent:
                     log.info("URC: %s", urc)
             if now - self._last_heartbeat >= self.heartbeat_sec:
                 self._last_heartbeat = now
-                log.info("heartbeat: %s", self.modem.signal())
+                with self.modem_lock:
+                    log.info("heartbeat: %s", self.modem.signal())
             if now - self._last_flush >= self.flush_sec:
                 self._last_flush = now
                 self.flush_outbox()
@@ -351,6 +392,7 @@ class AgentRunner:
         self._agent = Agent(cfg)
         self._thread = threading.Thread(target=self._run, daemon=True, name="agent")
         self._thread.start()
+        self._agent.uplink.start()  # 指令通道独立于串口重连，随 Agent 同生命周期
 
     def _run(self):
         try:

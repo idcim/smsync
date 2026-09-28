@@ -416,11 +416,17 @@ def device_login(payload: DeviceLoginIn, request: Request):
 
 @app.get("/api/v1/devices")
 def list_devices(user: dict = Depends(current_user)):
+    online = set(agent_channel.online_ids())
     if user["role"] == "admin":
-        return {"items": db.list_devices()}
-    if user.get("device"):
-        return {"items": []}  # 设备身份不需要管理设备
-    return {"items": db.list_devices(owner_id=user["id"])}
+        items = db.list_devices()
+    elif user.get("device"):
+        items = []  # 设备身份不需要管理设备
+    else:
+        items = db.list_devices(owner_id=user["id"])
+    # online 是实时状态（/ws/agent 指令通道是否连着），与 last_seen_at 不同
+    for it in items:
+        it["online"] = it["id"] in online
+    return {"items": items}
 
 
 @app.post("/api/v1/devices", status_code=201)
@@ -767,6 +773,7 @@ async def ws_agent(websocket: WebSocket, token: str = ""):
     device_id = subject["id"]
     await websocket.accept()
     await agent_channel.attach(websocket, device_id)
+    db.update_device(device_id, last_seen_at=_now_iso())  # 指令通道建立也算一次上线
     await hub.broadcast(json.dumps({"type": "agent", "data": {
         "online": True, "device_id": device_id, "device_name": subject["username"],
     }}, ensure_ascii=False), device_id=device_id)

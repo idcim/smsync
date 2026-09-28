@@ -8,6 +8,14 @@
     <el-table :data="devices" v-loading="loading" border>
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="name" label="设备名称" />
+      <el-table-column label="在线" width="90">
+        <template #default="{ row }">
+          <span class="online-cell">
+            <span class="dot" :class="row.online ? 'dot-on' : 'dot-off'"></span>
+            {{ row.online ? '在线' : '离线' }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column v-if="isAdmin()" label="属主" width="140">
         <template #default="{ row }">
           <span v-if="row.owner_id != null">{{ ownerName(row.owner_id) }}</span>
@@ -405,5 +413,22 @@ onMounted(() => {
 .owner-none {
   color: #909399;
   font-size: 13px;
+}
+.online-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-on {
+  background: #67c23a;
+}
+.dot-off {
+  background: #c0c4cc;
 }
 </style>

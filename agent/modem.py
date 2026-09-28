@@ -118,10 +118,9 @@ class Modem:
         assert self.ser is not None
         self.ser.write(cmd.encode("ascii") + b"\r")
 
-    def command(self, cmd: str, timeout: float = 5.0) -> tuple[bool, list[str]]:
-        """Send a command, return (ok, response_lines). URCs are buffered."""
+    def _wait_final(self, timeout: float) -> tuple[bool, list[str]]:
+        """等到 OK/ERROR 终态行；期间收到的 URC 行缓冲起来。"""
         lines: list[str] = []
-        self._write(cmd)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             line = self._readline(max(0.1, deadline - time.monotonic()))
@@ -135,7 +134,15 @@ class Modem:
                 self.pending_urcs.append(line)
                 continue
             lines.append(line)
-        raise serial.SerialTimeoutException(f"timeout waiting for response to {cmd!r}")
+        raise serial.SerialTimeoutException("timeout waiting for modem response")
+
+    def command(self, cmd: str, timeout: float = 5.0) -> tuple[bool, list[str]]:
+        """Send a command, return (ok, response_lines). URCs are buffered."""
+        self._write(cmd)
+        try:
+            return self._wait_final(timeout)
+        except serial.SerialTimeoutException:
+            raise serial.SerialTimeoutException(f"timeout waiting for response to {cmd!r}")
 
     def poll_urc(self, timeout: float = 1.0) -> Optional[str]:
         """Read one unsolicited line (returns None on timeout)."""
@@ -184,6 +191,24 @@ class Modem:
             log.warning("AT+CMGL failed: %s", lines)
             return []
         return parse_cmgl(lines)
+
+    def send_sms(self, number: str, text: str, timeout: float = 30.0) -> tuple[bool, str]:
+        """UCS2 文本模式发短信（参考 agent_rpi/modem.py）。返回 (ok, 错误或 +CMGS 引用)。"""
+        da = number.encode("utf-16-be").hex().upper()
+        body = text.encode("utf-16-be").hex().upper()
+        self._write(f'AT+CMGS="{da}"')
+        # 等待 "> " 提示符（无 CR/LF，按原始字节读）
+        assert self.ser is not None
+        self.ser.timeout = 10.0
+        prompt = self.ser.read_until(b">", size=64)
+        if b">" not in prompt:
+            return False, "no CMGS prompt"
+        self.ser.write(body.encode("ascii") + b"\x1a")  # ctrl-Z 结束输入
+        ok, lines = self._wait_final(timeout)
+        if ok:
+            ref = next((l for l in lines if l.startswith("+CMGS:")), "sent")
+            return True, ref
+        return False, "; ".join(lines) or "send failed"
 
     @staticmethod
     def cmti_index(urc: str) -> Optional[int]:

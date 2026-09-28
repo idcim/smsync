@@ -1,6 +1,6 @@
 ﻿; SMSync Agent Windows 安装包脚本（用 makensis.exe 编译，见 build_installer.sh）
 !define APP_NAME "SMSync Agent"
-!define APP_VERSION "1.2.0"
+!define APP_VERSION "1.3.0"
 !define APP_EXE "smsync-agent.exe"
 !define APP_ID "SMSyncAgent"
 !define PUBLISHER "SMSync"

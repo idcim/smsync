@@ -25,7 +25,7 @@ EC20 模块 ──串口──▶ agent/ 或 agent_rpi/ ──HTTPS POST──�
 |------|------|------|--------|
 | `server/` | REST API + SQLite + WS 推送 + PWA/管理后台托管 | `app:app`（uvicorn，端口 8000） | FastAPI, Pydantic, PyJWT |
 | `admin/` | 管理后台前端（用户/设备管理），构建产物在 `server/static/admin/` | `npm run build` | Vue 3, Element Plus, Vite |
-| `agent/` | Windows 采集端（插 EC20 的电脑，托盘 GUI） | `agent.py` | pyserial, pystray, Pillow, tkinter |
+| `agent/` | Windows 采集端（插 EC20 的电脑，托盘 GUI） | `agent.py` | pyserial, websocket-client, pystray, Pillow, tkinter |
 | `agent_rpi/` | 树莓派采集端：短信 + 语音通话 + 录音 | `agent.py` | pyserial, websocket-client, ALSA |
 | `client_electron/` | 桌面客户端：弹窗 + 验证码复制 + 主窗口 | `src/main.js` | Electron 37, ws |
 | `client_pc/` | 轻量 Python 通知器（系统弹窗，无界面） | `notifier.py` | windows-toasts, websocket-client |
@@ -36,7 +36,7 @@ EC20 模块 ──串口──▶ agent/ 或 agent_rpi/ ──HTTPS POST──�
 - `agent/outbox.py`：本地 SQLite 断网队列
 - `agent_rpi/voice.py`：通话状态机（RING/CLIP/CLCC 驱动）
 - `agent_rpi/audio.py`：通话录音（arecord/ALSA，WAV）
-- `agent_rpi/uplink.py`：WS 下行指令通道（拨号/接听/挂断/发短信）
+- `agent/uplink.py` / `agent_rpi/uplink.py`：WS 下行指令通道（发短信；拨号/接听/挂断仅树莓派端支持，Windows 端回 unsupported）
 - `server/app.py`：全部路由 + WS 管理；`server/db.py`：存储层；`server/config.py`：路径配置；`server/auth.py`：PBKDF2 密码哈希 + JWT 签发/校验
 
 ## 常用命令
