@@ -16,6 +16,8 @@
               复制
             </el-button>
           </div>
+          <!-- v2.3.0 时期创建的设备：不存明文，从未使用也无法查看 -->
+          <span v-else-if="!row.last_seen_at" class="key-expired">码已失效，请重置</span>
           <span v-else class="key-hidden">已使用，已隐藏</span>
         </template>
       </el-table-column>
@@ -34,9 +36,10 @@
           {{ row.last_seen_at ? formatTime(row.last_seen_at) : '从未' }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="320">
+      <el-table-column label="操作" width="400">
         <template #default="{ row }">
           <el-button size="small" @click="openRename(row)">重命名</el-button>
+          <el-button size="small" type="primary" plain @click="onRegenerate(row)">重置设备码</el-button>
           <el-button
             size="small"
             :type="row.disabled ? 'success' : 'warning'"
@@ -62,10 +65,10 @@
       </template>
     </el-dialog>
 
-    <!-- 创建成功：设备码只显示这一次 -->
+    <!-- 设备码展示（创建成功 / 重置成功共用） -->
     <el-dialog
       v-model="keyVisible"
-      title="设备创建成功"
+      :title="keyTitle"
       width="520px"
       :close-on-click-modal="false"
       :close-on-press-escape="false"
@@ -119,8 +122,17 @@ const createRules = {
 }
 
 const keyVisible = ref(false)
+const keyTitle = ref('设备创建成功')
 const createdKey = ref('')
 const copied = ref(false)
+
+// 弹出设备码结果对话框（创建/重置共用）
+function showKeyDialog(title, key) {
+  keyTitle.value = title
+  createdKey.value = key || ''
+  copied.value = false
+  keyVisible.value = true
+}
 
 const renameVisible = ref(false)
 const renameTarget = ref(null)
@@ -156,9 +168,7 @@ async function onCreate() {
   try {
     const { data } = await api.post('/devices', { name: createForm.name })
     createVisible.value = false
-    createdKey.value = data.device_key || ''
-    copied.value = false
-    keyVisible.value = true
+    showKeyDialog('设备创建成功', data.device_key)
     loadDevices()
   } catch (e) {
     ElMessage.error(errMsg(e, '创建失败'))
@@ -205,6 +215,25 @@ async function onRename() {
     ElMessage.error(errMsg(e, '重命名失败'))
   } finally {
     submitting.value = false
+  }
+}
+
+async function onRegenerate(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定为设备「${row.name}」重置设备码吗？旧设备码将立即失效，需用新码重新配置采集端。`,
+      '重置设备码',
+      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const { data } = await api.post(`/devices/${row.id}/regenerate`)
+    showKeyDialog(`设备码已重置：${row.name}`, data.device_key)
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '重置失败'))
   }
 }
 
@@ -276,6 +305,10 @@ onMounted(loadDevices)
 }
 .key-hidden {
   color: #909399;
+  font-size: 13px;
+}
+.key-expired {
+  color: #e6a23c;
   font-size: 13px;
 }
 </style>

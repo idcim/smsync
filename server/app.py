@@ -380,6 +380,16 @@ def update_device(device_id: int, payload: DeviceUpdateIn, _: dict = Depends(req
     return db.update_device(device_id, **fields)
 
 
+@app.post("/api/v1/devices/{device_id}/regenerate")
+def regenerate_device_key(device_id: int, _: dict = Depends(require_admin)):
+    """重置设备码：旧码立即失效，返回新码（同样只在设备下次使用前可见）。
+    用于设备码丢失（如创建弹窗被误关）时的找回。"""
+    if not db.get_device(device_id):
+        raise HTTPException(status_code=404, detail="not found")
+    device_key = "smsk_" + secrets.token_urlsafe(24)
+    return db.regenerate_device_key(device_id, _device_key_hash(device_key), device_key)
+
+
 @app.delete("/api/v1/devices/{device_id}")
 def delete_device(device_id: int, _: dict = Depends(require_admin)):
     if not db.delete_device(device_id):

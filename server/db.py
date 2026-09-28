@@ -337,6 +337,20 @@ class Database:
             )
             self._conn.commit()
 
+    def regenerate_device_key(self, device_id: int, key_hash: str, device_key: str) -> Optional[dict]:
+        """重置设备码（旧码立即失效）。返回更新后的行（含新明文码）。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE devices SET key_hash = ?, device_key = ? WHERE id = ?",
+                (key_hash, device_key, device_id),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT id, name, device_key, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
+                (device_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def update_device(self, device_id: int, **fields) -> Optional[dict]:
         sets = {k: v for k, v in fields.items() if k in _DEVICE_FIELDS and v is not None}
         with self._lock:

@@ -140,6 +140,7 @@ docker compose up -d
 | POST | `/api/v1/auth/refresh` | 用 refresh_token 换新 token 对（无状态续期；客户端只存 token 不存密码） |
 | GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（仅 admin；设备码仅设备未使用时可见，首次认证后服务端清除明文） |
 | PATCH/DELETE | `/api/v1/devices/{id}` | 重命名/启禁用、删除设备（仅 admin；禁用删除后其 token 立即失效） |
+| POST | `/api/v1/devices/{id}/regenerate` | 重置设备码（仅 admin；旧码立即失效，新码在设备使用前可见——用于设备码丢失找回） |
 | GET | `/api/v1/auth/me` | 当前登录用户信息 |
 | POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |
 | GET/POST | `/api/v1/users` | 用户列表 / 注册用户（仅 admin） |
