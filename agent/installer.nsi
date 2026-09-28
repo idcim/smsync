@@ -7,6 +7,9 @@
 
 !include "MUI2.nsh"
 
+; 生成 Unicode 安装包，否则中文组件名/描述会显示成问号
+Unicode true
+
 Name "${APP_NAME}"
 OutFile "dist\SMSyncAgent-Setup-${APP_VERSION}.exe"
 InstallDir "$PROGRAMFILES64\SMSyncAgent"
