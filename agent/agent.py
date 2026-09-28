@@ -29,7 +29,7 @@ from modem import Modem
 from outbox import Outbox
 from uplink import Uplink
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后：数据与配置放 %APPDATA%（Program Files 不可写）

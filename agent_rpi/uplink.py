@@ -45,6 +45,12 @@ class Uplink:
         if not cmd_id or not action:
             return
         log.info("command: %s %s", action, {k: v for k, v in data.items() if k not in ("id", "action")})
+        # 指令执行可能耗时几十秒（发短信等运营商应答），必须在独立线程里跑——
+        # 否则阻塞 WS 调度线程导致无法回 pong，服务端无 pong 会断连（指令丢失）
+        threading.Thread(target=self._execute, args=(ws, cmd_id, action, data),
+                         daemon=True, name=f"cmd-{action}").start()
+
+    def _execute(self, ws, cmd_id: str, action: str, data: dict):
         try:
             ok, error = self.handler(action, data)
         except Exception as e:
