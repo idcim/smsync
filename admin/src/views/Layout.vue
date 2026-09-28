@@ -7,6 +7,10 @@
           <el-icon><User /></el-icon>
           <span>用户管理</span>
         </el-menu-item>
+        <el-menu-item v-if="isAdmin()" index="/devices">
+          <el-icon><Monitor /></el-icon>
+          <span>设备管理</span>
+        </el-menu-item>
         <el-menu-item index="/password">
           <el-icon><Lock /></el-icon>
           <span>修改密码</span>
@@ -30,7 +34,7 @@
 
 <script setup>
 import { useRouter } from 'vue-router'
-import { User, Lock } from '@element-plus/icons-vue'
+import { User, Lock, Monitor } from '@element-plus/icons-vue'
 import { auth, clearAuth, isAdmin } from '../store'
 
 const router = useRouter()

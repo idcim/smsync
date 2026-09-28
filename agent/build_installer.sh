@@ -8,7 +8,9 @@ cd "$(dirname "$0")"
 
 MAKENSIS="${MAKENSIS:-$LOCALAPPDATA/electron-builder/cache/nsis-3.0.4.1/nsis-3.0.4.1-1mx3n/makensis.exe}"
 
-pyinstaller --noconfirm --clean --onefile --name smsync-agent \
+# --windowed：托盘程序不要控制台黑窗；pystray 按平台动态导入后端，需显式 hidden import
+pyinstaller --noconfirm --clean --onefile --windowed --name smsync-agent \
+  --hidden-import pystray._win32 \
   --add-data "$(pwd -W)/config.example.ini;." \
   --distpath dist --workpath build --specpath build \
   agent.py

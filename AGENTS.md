@@ -24,8 +24,8 @@ EC20 模块 ──串口──▶ agent/ 或 agent_rpi/ ──HTTPS POST──�
 | 目录 | 职责 | 入口 | 技术栈 |
 |------|------|------|--------|
 | `server/` | REST API + SQLite + WS 推送 + PWA/管理后台托管 | `app:app`（uvicorn，端口 8000） | FastAPI, Pydantic, PyJWT |
-| `admin/` | 管理后台前端（用户管理），构建产物在 `server/static/admin/` | `npm run build` | Vue 3, Element Plus, Vite |
-| `agent/` | Windows 采集端（插 EC20 的电脑） | `agent.py` | pyserial, websocket-client |
+| `admin/` | 管理后台前端（用户/设备管理），构建产物在 `server/static/admin/` | `npm run build` | Vue 3, Element Plus, Vite |
+| `agent/` | Windows 采集端（插 EC20 的电脑，托盘 GUI） | `agent.py` | pyserial, pystray, Pillow, tkinter |
 | `agent_rpi/` | 树莓派采集端：短信 + 语音通话 + 录音 | `agent.py` | pyserial, websocket-client, ALSA |
 | `client_electron/` | 桌面客户端：弹窗 + 验证码复制 + 主窗口 | `src/main.js` | Electron 37, ws |
 | `client_pc/` | 轻量 Python 通知器（系统弹窗，无界面） | `notifier.py` | windows-toasts, websocket-client |
@@ -70,7 +70,7 @@ cd /opt/smsync && ./deploy.sh
 
 ## 配置与密钥规则
 
-- 认证为多用户 + JWT 双 token：access 12h + refresh 30d。客户端/采集端用账号密码换 token 对，遇 401/WS 4401 用 `/api/v1/auth/refresh` 无状态续期；**交互式客户端（Electron/PWA/管理后台）只存 token 不存密码**，headless 采集端（agent/agent_rpi/client_pc）仍在 config.ini 存账号密码
+- 认证为多用户 + JWT 双 token：access 12h + refresh 30d。交互式客户端（Electron/PWA/管理后台）用账号密码换 token 对、**只存 token 不存密码**；采集端（`agent/`、`agent_rpi/`）在 config.ini 存 `device_key`（`/api/v1/auth/device` 换 token 对，401 先走 `/api/v1/auth/refresh` 续期）；`client_pc/` 通知器仍用账号密码
 - 所有 HTTP 接口（除 health/login）需 `Authorization: Bearer <JWT>`；WS 用 `?token=<JWT>` 查询参数
 - JWT 密钥：环境变量 `SMSYNC_JWT_SECRET` 或数据目录 `.jwt_secret`（首次自动生成）；admin 初始密码：`SMSYNC_ADMIN_PASSWORD` 或数据目录 `.admin_credentials`
 - 以下文件已 gitignore，**绝不提交**：`.env`、`client_electron/.env`、`server/.token`、`server/.jwt_secret`、`server/.admin_credentials`、`agent/config.ini`、`client_pc/config.ini`、`*.db`

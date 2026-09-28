@@ -44,7 +44,7 @@ def load_config() -> configparser.ConfigParser:
         if path.exists():
             cfg.read(path, encoding="utf-8")
             if name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your username/password!)", name)
+                log.warning("config.ini not found, using %s (copy it and set your device_key!)", name)
             return cfg
     sys.exit("no config.ini / config.example.ini found in agent_rpi/")
 
@@ -97,8 +97,7 @@ class Agent:
         server_url = cfg.get("server", "url", fallback="http://127.0.0.1:8000")
         self.auth = JwtAuth(
             server_url,
-            cfg.get("server", "username", fallback=""),
-            cfg.get("server", "password", fallback=""),
+            cfg.get("server", "device_key", fallback=""),
         )
         self.api = Api(server_url, self.auth)
         self.outbox = Outbox(str(BASE_DIR / cfg.get("agent", "outbox_db", fallback="outbox.db")))

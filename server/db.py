@@ -48,9 +48,19 @@ CREATE TABLE IF NOT EXISTS users (
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    key_hash TEXT UNIQUE NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT
+);
 """
 
 _USER_FIELDS = ("password_hash", "role", "disabled")
+_DEVICE_FIELDS = ("name", "disabled", "last_seen_at")
 
 _CALL_FIELDS = ("direction", "number", "status", "started_at",
                 "answered_at", "ended_at", "duration", "recording_file")
@@ -272,6 +282,64 @@ class Database:
     def delete_user(self, user_id: int) -> bool:
         with self._lock:
             cur = self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    # ---- devices（采集端设备码认证） ----
+
+    def create_device(self, name: str, key_hash: str) -> dict:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO devices (name, key_hash, created_at) VALUES (?, ?, ?)",
+                (name, key_hash, now),
+            )
+            self._conn.commit()
+            return dict(self._conn.execute(
+                "SELECT id, name, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
+                (cur.lastrowid,),
+            ).fetchone())
+
+    def get_device(self, device_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, name, key_hash, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
+                (device_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_device_by_hash(self, key_hash: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM devices WHERE key_hash = ?", (key_hash,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_devices(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, disabled, created_at, last_seen_at FROM devices ORDER BY id"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_device(self, device_id: int, **fields) -> Optional[dict]:
+        sets = {k: v for k, v in fields.items() if k in _DEVICE_FIELDS and v is not None}
+        with self._lock:
+            if sets:
+                cols = ", ".join(f"{k} = ?" for k in sets)
+                self._conn.execute(
+                    f"UPDATE devices SET {cols} WHERE id = ?", (*sets.values(), device_id)
+                )
+                self._conn.commit()
+            row = self._conn.execute(
+                "SELECT id, name, disabled, created_at, last_seen_at FROM devices WHERE id = ?",
+                (device_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_device(self, device_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
             self._conn.commit()
             return cur.rowcount > 0
 

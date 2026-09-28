@@ -1,30 +1,37 @@
-"""SMSync agent: watches the EC20 for incoming SMS and uploads them to the server.
+"""SMSync agent：EC20 短信采集上传 + 系统托盘 GUI。
 
-Run:  python agent.py   (打包后：smsync-agent.exe)
-Conf: config.ini next to this file / the exe (falls back to config.example.ini).
-Only third-party dependency: pyserial.
+Run:  python agent.py   （打包后：smsync-agent.exe，驻留系统托盘）
+Conf: 读取顺序 %APPDATA%\\SMSyncAgent\\config.ini → exe 旁 config.ini → 内置 config.example.ini；
+      设置窗口保存永远写 %APPDATA% 那份（Program Files 下 exe 目录不可写）。
+依赖：pyserial、pystray、Pillow（tkinter 为标准库）。
 """
 
 import configparser
 import json
 import logging
 import os
+import queue
 import sys
+import threading
 import time
+import tkinter as tk
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from tkinter import ttk
 
+import pystray
 import serial
+from PIL import Image, ImageDraw
 
 from modem import Modem
 from outbox import Outbox
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 if getattr(sys, "frozen", False):
-    # PyInstaller 打包后：config.ini 放在 exe 旁边，数据放 %APPDATA%（Program Files 不可写）
+    # PyInstaller 打包后：数据与配置放 %APPDATA%（Program Files 不可写）
     BASE_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
     DATA_DIR = Path(os.environ.get("APPDATA", str(BASE_DIR))) / "SMSyncAgent"
@@ -33,6 +40,9 @@ else:
     BUNDLE_DIR = BASE_DIR
     DATA_DIR = BASE_DIR
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# 设置窗口保存的目标配置（冻结模式下在 %APPDATA%，开发模式即 agent/config.ini）
+CONFIG_PATH = DATA_DIR / "config.ini"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,44 +57,105 @@ log = logging.getLogger("smsync.agent")
 
 def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
-    for path in (BASE_DIR / "config.ini", BUNDLE_DIR / "config.example.ini"):
+    for path in (CONFIG_PATH, BASE_DIR / "config.ini", BUNDLE_DIR / "config.example.ini"):
         if path.exists():
             cfg.read(path, encoding="utf-8")
-            if path.name == "config.example.ini":
-                log.warning("config.ini not found, using %s (copy it and set your username/password!)", path)
+            log.info("config loaded from %s", path)
             return cfg
     sys.exit("no config.ini / config.example.ini found")
 
 
+def save_config(server_url: str, device_key: str, port: str):
+    """设置窗口保存：只覆盖 url/device_key/port 三项，其余配置（[agent] 等）保留。"""
+    cfg = load_config()
+    for section in ("server", "modem"):
+        if not cfg.has_section(section):
+            cfg.add_section(section)
+    cfg.set("server", "url", server_url)
+    cfg.set("server", "device_key", device_key)
+    cfg.set("modem", "port", port)
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        cfg.write(f)
+    log.info("config saved to %s", CONFIG_PATH)
+
+
+# ---- 运行状态（采集线程写，GUI 读） ----------------------------------------
+
+_status_lock = threading.Lock()
+_status_text = "未配置"
+
+
+def set_status(text: str):
+    global _status_text
+    with _status_lock:
+        _status_text = text
+    log.info("status: %s", text)
+
+
+def get_status() -> str:
+    with _status_lock:
+        return _status_text
+
+
 class Uploader:
-    def __init__(self, base_url: str, username: str, password: str):
+    """设备码认证：/auth/device 换 token 对；REST 401 先 refresh 续期，失败再重新认证。"""
+
+    def __init__(self, base_url: str, device_key: str, stop: threading.Event, on_status):
         self.base = base_url.rstrip("/")
         self.url = self.base + "/api/v1/sms"
-        self.username = username
-        self.password = password
-        self.token: str | None = None  # JWT，首次发送前登录获取
+        self.device_key = device_key
+        self._stop = stop
+        self._status = on_status
+        self.token: str | None = None          # access token
+        self.refresh_token: str | None = None
+
+    def _auth(self, path: str, body: dict) -> dict:
+        req = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            return json.loads(resp.read())
+
+    def _save_tokens(self, data: dict):
+        self.token = data["access_token"]
+        self.refresh_token = data.get("refresh_token")
 
     def login(self):
-        """用用户名密码换 JWT；429（连续失败被锁定）时等 60 秒再试。"""
-        while True:
-            req = urllib.request.Request(
-                self.base + "/api/v1/auth/token",
-                data=json.dumps({"username": self.username, "password": self.password}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+        """设备码认证；429 限流 / 401 设备码无效都等 60 秒再试（等待可被停止打断）。"""
+        while not self._stop.is_set():
             try:
-                with urllib.request.urlopen(req, timeout=10.0) as resp:
-                    data = json.loads(resp.read())
-                self.token = data["access_token"]
-                log.info("已登录为 %s", data.get("user", {}).get("username", self.username))
+                self._save_tokens(self._auth("/api/v1/auth/device", {"device_key": self.device_key}))
+                log.info("设备认证成功")
+                self._status("认证成功")
                 return
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    log.warning("登录连续失败被锁定，60 秒后重试")
-                    time.sleep(60)
-                    continue
-                raise RuntimeError(f"login failed: HTTP {e.code}")
+                    log.warning("认证被限流，60 秒后重试")
+                    self._status("认证被限流，60 秒后重试")
+                elif e.code == 401:
+                    # 设备码错误或设备被禁用：立即重试没意义，等用户在设置里改
+                    log.error("设备码无效或设备已禁用，60 秒后重试")
+                    self._status("错误：设备码无效或已禁用")
+                else:
+                    raise RuntimeError(f"device auth failed: HTTP {e.code}")
+            self._stop.wait(60)
+        raise RuntimeError("agent stopped")
+
+    def refresh(self) -> bool:
+        """refresh_token 无状态续期；失败返回 False（调用方再重新认证）。"""
+        if not self.refresh_token:
+            return False
+        try:
+            self._save_tokens(self._auth("/api/v1/auth/refresh", {"refresh_token": self.refresh_token}))
+            log.info("access token 已续期")
+            return True
+        except Exception as e:
+            log.warning("token refresh failed: %s", e)
+            return False
 
     def _post(self, payload: dict, timeout: float):
         req = urllib.request.Request(
@@ -108,22 +179,26 @@ class Uploader:
         except urllib.error.HTTPError as e:
             if e.code != 401:
                 raise
-            # JWT 过期：重新登录后重试一次
-            log.info("JWT 失效，重新登录后重试")
-            self.login()
+            # access token 过期：先 refresh 续期重试一次，refresh 失败才用设备码重新认证
+            log.info("JWT 失效，尝试 refresh 续期")
+            if not self.refresh():
+                self.login()
             self._post(payload, timeout)
 
 
 class Agent:
-    def __init__(self, cfg: configparser.ConfigParser):
+    def __init__(self, cfg: configparser.ConfigParser, on_status=set_status):
+        self._status = on_status
+        self._stop = threading.Event()
         self.modem = Modem(
             cfg.get("modem", "port", fallback="COM9"),
             cfg.getint("modem", "baudrate", fallback=115200),
         )
         self.uploader = Uploader(
             cfg.get("server", "url", fallback="http://127.0.0.1:8000"),
-            cfg.get("server", "username", fallback=""),
-            cfg.get("server", "password", fallback=""),
+            cfg.get("server", "device_key", fallback=""),
+            self._stop,
+            on_status,
         )
         outbox_name = cfg.get("agent", "outbox_db", fallback="outbox.db")
         outbox_path = Path(outbox_name)
@@ -135,10 +210,15 @@ class Agent:
         self._last_heartbeat = 0.0
         self._last_flush = 0.0
 
+    def stop(self):
+        """让主循环尽快退出（关串口打断阻塞读，各处的 wait 也会被唤醒）。"""
+        self._stop.set()
+        self.modem.close()
+
     # ---- modem lifecycle -------------------------------------------------
 
     def connect(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 self.modem.open()
                 self.modem.init_basic()
@@ -146,10 +226,10 @@ class Agent:
             except Exception as e:
                 log.error("modem connect failed (%s); retrying in 5s", e)
                 self.modem.close()
-                time.sleep(5)
+                self._stop.wait(5)
 
     def wait_for_sim(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 if self.modem.sim_ready():
                     log.info("SIM ready")
@@ -158,7 +238,7 @@ class Agent:
                 log.error("CPIN check failed: %s", e)
                 raise
             log.warning("SIM not ready, waiting 10s...")
-            time.sleep(10)
+            self._stop.wait(10)
 
     # ---- sms handling ----------------------------------------------------
 
@@ -206,27 +286,37 @@ class Agent:
     # ---- main loop -------------------------------------------------------
 
     def run(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 self.connect()
+                if self._stop.is_set():
+                    break
                 self.wait_for_sim()
+                if self._stop.is_set():
+                    break
                 self.modem.init_sms()
                 self.drain_stored()
                 self.loop()
             except (serial.SerialException, OSError) as e:
+                if self._stop.is_set():
+                    break
                 log.error("serial error (%s); reconnecting in 5s", e)
+                self._status("错误：串口断开，重连中")
                 self.modem.close()
-                time.sleep(5)
-            except KeyboardInterrupt:
-                raise
+                self._stop.wait(5)
             except Exception:
+                if self._stop.is_set():
+                    break
                 log.exception("unexpected error; restarting in 5s")
                 self.modem.close()
-                time.sleep(5)
+                self._stop.wait(5)
+        self.modem.close()
+        log.info("agent loop stopped")
 
     def loop(self):
         log.info("listening for incoming SMS...")
-        while True:
+        self._status("已上线")
+        while not self._stop.is_set():
             urc = self.modem.poll_urc(timeout=1.0)
             now = time.monotonic()
             if urc:
@@ -243,13 +333,178 @@ class Agent:
                 self.flush_outbox()
 
 
+# ---- 采集线程管理 ----------------------------------------------------------
+
+class AgentRunner:
+    """启动 / 停止 / 保存配置后重启采集线程（不重启进程）。"""
+
+    def __init__(self):
+        self._agent: Agent | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self, cfg: configparser.ConfigParser):
+        self.stop()
+        if not cfg.get("server", "device_key", fallback="").strip():
+            set_status("未配置（请填写设备码）")
+            return
+        set_status("连接中")
+        self._agent = Agent(cfg)
+        self._thread = threading.Thread(target=self._run, daemon=True, name="agent")
+        self._thread.start()
+
+    def _run(self):
+        try:
+            self._agent.run()
+        except Exception:
+            log.exception("agent thread crashed")
+            set_status("错误：采集线程异常退出")
+
+    def stop(self):
+        if self._agent is not None:
+            self._agent.stop()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                log.warning("agent thread did not stop in time")
+        self._agent = None
+        self._thread = None
+
+
+# ---- 托盘图标 --------------------------------------------------------------
+
+def make_icon_image(color: str = "#1e88e5") -> Image.Image:
+    """现场画一个纯色圆形图标，不引入图片资源文件。"""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((6, 6, 58, 58), fill=color)
+    return img
+
+
+def run_tray(cmd_queue: queue.Queue, icon_holder: dict):
+    """pystray 独占一个线程跑消息循环；菜单动作经队列转交 tkinter 主线程。"""
+
+    def on_open(icon, item):
+        cmd_queue.put("open")
+
+    def on_quit(icon, item):
+        cmd_queue.put("quit")
+
+    icon = pystray.Icon(
+        "smsync-agent",
+        make_icon_image(),
+        f"SMSync Agent v{__version__}",
+        pystray.Menu(
+            pystray.MenuItem("打开设置", on_open, default=True),
+            pystray.MenuItem("退出", on_quit),
+        ),
+    )
+    icon_holder["icon"] = icon
+    icon.run()
+
+
+# ---- 设置窗口 --------------------------------------------------------------
+
+class SettingsWindow:
+    """tkinter 设置窗口：服务器地址 / 设备码 / 串口 + 保存 + 状态标签。"""
+
+    def __init__(self, root: tk.Tk, on_save, get_status_fn):
+        self.root = root
+        self.on_save = on_save            # 保存后回调：重启采集线程
+        self.get_status = get_status_fn
+        self.win: tk.Toplevel | None = None
+
+    def open(self):
+        if self.win is not None and self.win.winfo_exists():
+            self.win.lift()
+            self.win.focus_force()
+            return
+        cfg = load_config()
+        win = tk.Toplevel(self.root)
+        win.title(f"SMSync Agent v{__version__} 设置")
+        win.resizable(False, False)
+
+        url_var = tk.StringVar(value=cfg.get("server", "url", fallback="http://127.0.0.1:8000"))
+        key_var = tk.StringVar(value=cfg.get("server", "device_key", fallback=""))
+        port_var = tk.StringVar(value=cfg.get("modem", "port", fallback="COM9"))
+
+        form = ttk.Frame(win, padding=12)
+        form.grid()
+        for i, (label, var) in enumerate((("服务器地址", url_var), ("设备码", key_var), ("串口", port_var))):
+            ttk.Label(form, text=label).grid(row=i, column=0, sticky="e", padx=(0, 8), pady=4)
+            ttk.Entry(form, textvariable=var, width=42).grid(row=i, column=1, pady=4)
+        ttk.Label(form, text="设备码在管理后台「设备管理」中创建设备获得（smsk_ 开头）",
+                  foreground="#888888").grid(row=3, column=0, columnspan=2, sticky="w")
+
+        status_var = tk.StringVar(value=self.get_status())
+        ttk.Label(form, textvariable=status_var, foreground="#1e88e5").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        def save():
+            try:
+                save_config(url_var.get().strip(), key_var.get().strip(), port_var.get().strip())
+            except Exception as e:
+                log.exception("save config failed")
+                status_var.set(f"保存失败：{e}")
+                return
+            status_var.set("已保存，正在重启采集…")
+            self.on_save()
+
+        ttk.Button(form, text="保存", command=save).grid(row=5, column=1, sticky="e", pady=(8, 0))
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self.win = win
+
+        def poll_status():
+            if self.win is None or not self.win.winfo_exists():
+                return
+            status_var.set(self.get_status())
+            self.win.after(1000, poll_status)
+
+        poll_status()
+
+
 def main():
-    cfg = load_config()
     log.info("smsync-agent v%s starting (data dir: %s)", __version__, DATA_DIR)
+    cmd_queue: queue.Queue = queue.Queue()
+    icon_holder: dict = {}
+    runner = AgentRunner()
+
+    # tkinter 主循环跑主线程（隐藏主窗口，只留托盘 + 设置窗口）
+    root = tk.Tk()
+    root.withdraw()
+    settings = SettingsWindow(root, on_save=lambda: runner.start(load_config()), get_status_fn=get_status)
+
+    threading.Thread(target=run_tray, args=(cmd_queue, icon_holder), daemon=True, name="tray").start()
+
+    def poll_queue():
+        try:
+            while True:
+                cmd = cmd_queue.get_nowait()
+                if cmd == "open":
+                    settings.open()
+                elif cmd == "quit":
+                    root.quit()
+                    return
+        except queue.Empty:
+            pass
+        root.after(200, poll_queue)
+
+    root.after(200, poll_queue)
+
+    cfg = load_config()
+    runner.start(cfg)
+    if not cfg.get("server", "device_key", fallback="").strip():
+        # 首次运行（没有设备码）：自动弹出设置窗口
+        root.after(300, settings.open)
+
     try:
-        Agent(cfg).run()
+        root.mainloop()
     except KeyboardInterrupt:
-        log.info("stopped")
+        pass
+    log.info("shutting down...")
+    runner.stop()
+    icon = icon_holder.get("icon")
+    if icon is not None:
+        icon.stop()
+    root.destroy()
 
 
 if __name__ == "__main__":

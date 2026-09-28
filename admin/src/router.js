@@ -9,6 +9,7 @@ const routes = [
     children: [
       { path: '', redirect: '/users' },
       { path: 'users', name: 'users', component: () => import('./views/Users.vue'), meta: { title: '用户管理', admin: true } },
+      { path: 'devices', name: 'devices', component: () => import('./views/Devices.vue'), meta: { title: '设备管理', admin: true } },
       { path: 'password', name: 'password', component: () => import('./views/Password.vue'), meta: { title: '修改密码' } }
     ]
   },

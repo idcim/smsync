@@ -1,0 +1,256 @@
+<template>
+  <div>
+    <div class="toolbar">
+      <el-button type="primary" @click="openCreate">新建设备</el-button>
+      <el-button @click="loadDevices" :loading="loading">刷新</el-button>
+    </div>
+
+    <el-table :data="devices" v-loading="loading" border>
+      <el-table-column prop="id" label="ID" width="70" />
+      <el-table-column prop="name" label="设备名称" />
+      <el-table-column label="状态" width="100">
+        <template #default="{ row }">
+          <el-tag :type="row.disabled ? 'warning' : 'success'">
+            {{ row.disabled ? '已禁用' : '正常' }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="创建时间" width="200">
+        <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+      </el-table-column>
+      <el-table-column label="最近上线" width="200">
+        <template #default="{ row }">
+          {{ row.last_seen_at ? formatTime(row.last_seen_at) : '从未' }}
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="320">
+        <template #default="{ row }">
+          <el-button size="small" @click="openRename(row)">重命名</el-button>
+          <el-button
+            size="small"
+            :type="row.disabled ? 'success' : 'warning'"
+            @click="toggleDisabled(row)"
+          >
+            {{ row.disabled ? '启用' : '禁用' }}
+          </el-button>
+          <el-button size="small" type="danger" @click="onDelete(row)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <!-- 新建设备 -->
+    <el-dialog v-model="createVisible" title="新建设备" width="420px">
+      <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="80px">
+        <el-form-item label="设备名称" prop="name">
+          <el-input v-model="createForm.name" placeholder="例如：机房 EC20 采集端" maxlength="64" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="onCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 创建成功：设备码只显示这一次 -->
+    <el-dialog
+      v-model="keyVisible"
+      title="设备创建成功"
+      width="520px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        title="设备码只显示这一次，请立即复制保存！关闭后将无法再查看。"
+        class="key-alert"
+      />
+      <div class="key-box">
+        <span class="key-text">{{ createdKey }}</span>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="copyKey">
+          {{ copied ? '已复制 ✓' : '复制设备码' }}
+        </el-button>
+        <el-button @click="keyVisible = false">我已保存，关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 重命名 -->
+    <el-dialog v-model="renameVisible" title="重命名设备" width="420px">
+      <el-form ref="renameFormRef" :model="renameForm" :rules="createRules" label-width="80px">
+        <el-form-item label="设备名称" prop="name">
+          <el-input v-model="renameForm.name" maxlength="64" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="renameVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="onRename">确定</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup>
+import { onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import api, { errMsg } from '../api'
+
+const devices = ref([])
+const loading = ref(false)
+const submitting = ref(false)
+
+const createVisible = ref(false)
+const createFormRef = ref()
+const createForm = reactive({ name: '' })
+const createRules = {
+  name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }]
+}
+
+const keyVisible = ref(false)
+const createdKey = ref('')
+const copied = ref(false)
+
+const renameVisible = ref(false)
+const renameTarget = ref(null)
+const renameFormRef = ref()
+const renameForm = reactive({ name: '' })
+
+function formatTime(t) {
+  if (!t) return ''
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? t : d.toLocaleString('zh-CN', { hour12: false })
+}
+
+async function loadDevices() {
+  loading.value = true
+  try {
+    const { data } = await api.get('/devices')
+    devices.value = data.items || []
+  } catch (e) {
+    ElMessage.error(errMsg(e, '加载设备列表失败'))
+  } finally {
+    loading.value = false
+  }
+}
+
+function openCreate() {
+  createForm.name = ''
+  createVisible.value = true
+}
+
+async function onCreate() {
+  await createFormRef.value.validate().catch(() => Promise.reject())
+  submitting.value = true
+  try {
+    const { data } = await api.post('/devices', { name: createForm.name })
+    createVisible.value = false
+    createdKey.value = data.device_key || ''
+    copied.value = false
+    keyVisible.value = true
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '创建失败'))
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function copyKey() {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(createdKey.value)
+    } else {
+      // 非安全上下文的兜底方案
+      const ta = document.createElement('textarea')
+      ta.value = createdKey.value
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    copied.value = true
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本复制')
+  }
+}
+
+function openRename(row) {
+  renameTarget.value = row
+  renameForm.name = row.name
+  renameVisible.value = true
+}
+
+async function onRename() {
+  await renameFormRef.value.validate().catch(() => Promise.reject())
+  submitting.value = true
+  try {
+    await api.patch(`/devices/${renameTarget.value.id}`, { name: renameForm.name })
+    ElMessage.success('已重命名')
+    renameVisible.value = false
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '重命名失败'))
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function toggleDisabled(row) {
+  try {
+    await api.patch(`/devices/${row.id}`, { disabled: !row.disabled })
+    ElMessage.success(row.disabled ? '已启用' : '已禁用')
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '操作失败'))
+  }
+}
+
+async function onDelete(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除设备「${row.name}」吗？删除后该设备码将立即失效，不可恢复。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.delete(`/devices/${row.id}`)
+    ElMessage.success('已删除')
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '删除失败'))
+  }
+}
+
+onMounted(loadDevices)
+</script>
+
+<style scoped>
+.toolbar {
+  margin-bottom: 16px;
+  display: flex;
+  gap: 12px;
+}
+.key-alert {
+  margin-bottom: 16px;
+}
+.key-box {
+  background: #f5f7fa;
+  border: 1px dashed #dcdfe6;
+  border-radius: 6px;
+  padding: 16px;
+  text-align: center;
+  word-break: break-all;
+}
+.key-text {
+  font-family: monospace;
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+  user-select: all;
+}
+</style>

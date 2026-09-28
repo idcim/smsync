@@ -67,11 +67,13 @@ def verify_password(password: str, stored: str) -> bool:
 # ---- JWT ----
 
 def make_token(user: dict, kind: str = "access") -> str:
-    """kind: "access"（业务请求用，短效） | "refresh"（仅用于换新 token，长效）"""
+    """kind: "access"（业务请求用，短效） | "refresh"（仅用于换新 token，长效）。
+    设备身份的 sub 带 dev: 前缀，与用户名账号区分。"""
     now = int(time.time())
     ttl = ACCESS_HOURS * 3600 if kind == "access" else REFRESH_DAYS * 86400
+    sub = f"dev:{user['id']}" if user.get("device") else str(user["id"])
     payload = {
-        "sub": str(user["id"]),
+        "sub": sub,
         "username": user["username"],
         "role": user["role"],
         "typ": kind,

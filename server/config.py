@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("SMSYNC_DB", str(BASE_DIR / "smsync.db"))

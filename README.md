@@ -56,22 +56,21 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 
 首次启动自动创建管理员账号 `admin`：密码优先取环境变量 `SMSYNC_ADMIN_PASSWORD`，否则随机生成并写入**数据目录**下的 `.admin_credentials`（本地开发即 `server/.admin_credentials`，Docker 里在数据卷 `/data/.admin_credentials`，用 `docker exec smsync-server cat /data/.admin_credentials` 查看）。
 
-### 管理后台（用户管理）
+### 管理后台（用户 + 设备管理）
 
-浏览器打开 `http://服务器地址:8000/admin/`，用 admin 登录后可：注册新用户、重置密码、启用/禁用账号、删除用户、修改自己的密码。所有客户端和采集端都用这里注册的账号登录。
+浏览器打开 `http://服务器地址:8000/admin/`，用 admin 登录后可：
+
+- **用户管理**：注册新用户、重置密码、启用/禁用账号、删除用户、修改自己的密码。客户端（Electron/PWA/通知器）用这里注册的账号登录
+- **设备管理**：创建采集端设备并生成**设备码**（`smsk_` 开头，只在创建时显示一次，请立即复制）、启用/禁用、重命名、删除。插 EC20 的采集端（Windows agent / 树莓派）用设备码上线，不占用用户账号
 
 - 后端改造源码在 `admin/`（Vue 3 + Element Plus + Vite），改动后 `cd admin && npm install && npm run build` 重新构建到 `server/static/admin/`
-- 普通用户（role=user）可登录各客户端收发查看，但没有用户管理权限
+- 普通用户（role=user）可登录各客户端收发查看，但没有用户/设备管理权限
 
 ### 2. 采集端（插 EC20 的电脑）
 
-```bash
-cd agent
-pip install -r requirements.txt
-# 编辑 config.ini：modem 端口（设备管理器里 "Quectel USB AT Port"，本机为 COM9）、
-# 服务器 url、username/password（管理后台注册的账号）
-python agent.py
-```
+安装 `SMSyncAgent-Setup-<版本号>.exe`（或 `python agent.py` 源码运行）。启动后驻留**系统托盘**（右下角），首次运行自动弹出设置窗口：填服务器地址、**设备码**（管理后台「设备管理」创建）、串口（设备管理器里 "Quectel USB AT Port"，本机为 COM9），保存即上线；双击托盘图标可随时改配置。
+
+配置保存在 `%APPDATA%\SMSyncAgent\config.ini`（命令行方式也可手工编辑该文件）。
 
 插入 SIM 卡后自动进入监听；新短信实时上传，断网时本地暂存、恢复后自动补传。
 
@@ -136,8 +135,11 @@ docker compose up -d
 |------|------|------|
 | GET | `/api/v1/auth/captcha` | 图形验证码 `{captcha_id, image}`（一次性、5 分钟过期） |
 | POST | `/api/v1/auth/login` | 网页登录 `{username, password, captcha_id, captcha_text}`，强制验证码；连续失败 5 次锁 60 秒 |
-| POST | `/api/v1/auth/token` | 机器客户端登录 `{username, password}`（agent/Electron 等无人值守程序用，免验证码，同样限流） |
+| POST | `/api/v1/auth/token` | 机器客户端登录 `{username, password}`（免验证码，同样限流） |
+| POST | `/api/v1/auth/device` | 采集端设备码登录 `{device_key}`（免验证码，限流；设备禁用即 401） |
 | POST | `/api/v1/auth/refresh` | 用 refresh_token 换新 token 对（无状态续期；客户端只存 token 不存密码） |
+| GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（仅 admin；**设备码只在创建响应里返回一次**，服务端只存哈希） |
+| PATCH/DELETE | `/api/v1/devices/{id}` | 重命名/启禁用、删除设备（仅 admin；禁用删除后其 token 立即失效） |
 | GET | `/api/v1/auth/me` | 当前登录用户信息 |
 | POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |
 | GET/POST | `/api/v1/users` | 用户列表 / 注册用户（仅 admin） |
@@ -176,7 +178,7 @@ schtasks /create /tn SMSyncServer /tr "cmd /c cd /d D:\DEV_AI\smsync\server && C
 
 ## 安全设计
 
-- **鉴权**：多用户 + JWT 双 token（HS256，密钥在数据目录 `.jwt_secret` 或 `SMSYNC_JWT_SECRET`）：access token 默认 12 小时，refresh token 默认 30 天（`SMSYNC_JWT_ACCESS_HOURS` / `SMSYNC_JWT_REFRESH_DAYS` 可调）；access 过期后客户端用 `/api/v1/auth/refresh` 无状态换新，**客户端只保存 token 不保存密码**。密码 PBKDF2-HMAC-SHA256（10 万次迭代）哈希存储；网页登录强制图形验证码（一次性、5 分钟过期）+ 连续失败 5 次锁 60 秒；机器客户端走免验证码的 `/api/v1/auth/token`（同样限流）；禁用/删除用户后其所有 token 立即失效。除 `/api/v1/health` 和登录接口外所有 API 与两个 WS 通道都要求有效 access token；用户管理接口仅 admin
+- **鉴权**：多用户 + JWT 双 token（HS256，密钥在数据目录 `.jwt_secret` 或 `SMSYNC_JWT_SECRET`）：access token 默认 12 小时，refresh token 默认 30 天（`SMSYNC_JWT_ACCESS_HOURS` / `SMSYNC_JWT_REFRESH_DAYS` 可调）；access 过期后客户端用 `/api/v1/auth/refresh` 无状态换新，**客户端只保存 token 不保存密码**。密码 PBKDF2-HMAC-SHA256（10 万次迭代）哈希存储；网页登录强制图形验证码（一次性、5 分钟过期）+ 连续失败 5 次锁 60 秒；机器客户端走免验证码的 `/api/v1/auth/token`（同样限流）；采集端用设备码（高熵随机串，服务端只存 SHA-256 哈希，创建时仅显示一次）走 `/api/v1/auth/device`；禁用/删除用户或设备后其所有 token 立即失效。除 `/api/v1/health` 和登录接口外所有 API 与两个 WS 通道都要求有效 access token；用户管理接口仅 admin
 - **传输**：JWT 在 HTTP 头与 WS 查询参数里明文传输，**公网部署必须套 HTTPS**（1Panel 反代 + SSL），否则凭据与短信内容会被窃听
 - **AT 指令注入**：拨号/发短信的号码在服务端做白名单校验（仅 `0-9+*#,`，≤20 位），非法输入 422 拒绝，到不了 modem
 - **注入与 XSS**：数据库全部参数化查询；PWA 与 Electron 界面渲染短信/号码统一转义（`esc()` / `textContent`）

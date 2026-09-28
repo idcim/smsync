@@ -57,7 +57,7 @@ alsaloop -C hw: pcmcard -P hw: usbcard -r 8000 -c 1 -f S16_LE
 ```bash
 sudo apt install -y python3-pip alsa-utils
 pip install -r requirements.txt   # pyserial, websocket-client
-cp config.example.ini config.ini  # 填服务器地址和 token
+cp config.example.ini config.ini  # 填服务器地址和设备码（管理后台「设备管理」创建）
 python agent.py
 ```
 

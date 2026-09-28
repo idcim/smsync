@@ -98,6 +98,31 @@ class UserUpdateIn(BaseModel):
 
 # ---- 认证依赖 ----
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _resolve_subject(payload: dict) -> Optional[dict]:
+    """把 JWT 的 sub 解析成用户/设备。设备 sub 形如 'dev:3'。无效返回 None。"""
+    sub = str(payload.get("sub", ""))
+    if sub.startswith("dev:"):
+        try:
+            dev = db.get_device(int(sub[4:]))
+        except ValueError:
+            return None
+        if not dev or dev["disabled"]:
+            return None
+        return {"id": dev["id"], "username": dev["name"], "role": "device", "device": True}
+    try:
+        user = db.get_user(int(sub))
+    except ValueError:
+        return None
+    if not user or user["disabled"]:
+        return None
+    return user
+
+
 def _user_from_token(token: str, kind: str = "access") -> dict:
     try:
         payload = decode_token(token)
@@ -106,10 +131,10 @@ def _user_from_token(token: str, kind: str = "access") -> dict:
     # typ 缺省按 access 处理（兼容旧版签发的 token）
     if payload.get("typ", "access") != kind:
         raise HTTPException(status_code=401, detail="wrong token type")
-    user = db.get_user(int(payload["sub"]))
-    if not user or user["disabled"]:
-        raise HTTPException(status_code=401, detail="user disabled or deleted")
-    return user
+    subject = _resolve_subject(payload)
+    if not subject:
+        raise HTTPException(status_code=401, detail="user/device disabled or deleted")
+    return subject
 
 
 def current_user(authorization: str = Header(default="")) -> dict:
@@ -281,12 +306,85 @@ class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=4096)
 
 
+class DeviceLoginIn(BaseModel):
+    device_key: str = Field(min_length=1, max_length=128)
+
+
+class DeviceCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+
+
+class DeviceUpdateIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    disabled: Optional[bool] = None
+
+
+def _device_key_hash(device_key: str) -> str:
+    # 设备码是高熵随机串，sha256 足够（无需 PBKDF2）
+    import hashlib as _hl
+    return _hl.sha256(device_key.encode("utf-8")).hexdigest()
+
+
 @app.post("/api/v1/auth/refresh")
 def refresh_token(payload: RefreshIn):
     """用 refresh token 换新的一对 token（无状态刷新，旧 refresh 在到期前仍可用）。
     客户端只保存 token、不保存密码；refresh 也失效时才需要重新输密码。"""
     user = _user_from_token(payload.refresh_token, kind="refresh")
+    if user.get("device"):
+        db.update_device(user["id"], last_seen_at=_now_iso())
     return _token_pair(user)
+
+
+@app.post("/api/v1/auth/device")
+def device_login(payload: DeviceLoginIn, request: Request):
+    """采集端用设备码换 token 对（免验证码，受限流保护）。"""
+    ip = request.client.host if request.client else "-"
+    key, fails = _login_throttle(payload.device_key[:16], ip)
+    dev = db.get_device_by_hash(_device_key_hash(payload.device_key))
+    if not dev or dev["disabled"]:
+        fails += 1
+        _login_fails[key] = (fails, time.monotonic() + 60 if fails >= 5 else 0.0)
+        raise HTTPException(status_code=401, detail="invalid device key")
+    _login_fails.pop(key, None)
+    db.update_device(dev["id"], last_seen_at=_now_iso())
+    return _token_pair({
+        "id": dev["id"], "username": dev["name"], "role": "device", "device": True,
+    })
+
+
+# ---- 设备管理（仅 admin） ----
+
+@app.get("/api/v1/devices")
+def list_devices(_: dict = Depends(require_admin)):
+    return {"items": db.list_devices()}
+
+
+@app.post("/api/v1/devices", status_code=201)
+def create_device(payload: DeviceCreateIn, _: dict = Depends(require_admin)):
+    # 设备码只在此处返回一次，服务端只存哈希
+    device_key = "smsk_" + secrets.token_urlsafe(24)
+    dev = db.create_device(payload.name, _device_key_hash(device_key))
+    return {**dev, "device_key": device_key}
+
+
+@app.patch("/api/v1/devices/{device_id}")
+def update_device(device_id: int, payload: DeviceUpdateIn, _: dict = Depends(require_admin)):
+    dev = db.get_device(device_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="not found")
+    fields = {}
+    if payload.name is not None:
+        fields["name"] = payload.name
+    if payload.disabled is not None:
+        fields["disabled"] = 1 if payload.disabled else 0
+    return db.update_device(device_id, **fields)
+
+
+@app.delete("/api/v1/devices/{device_id}")
+def delete_device(device_id: int, _: dict = Depends(require_admin)):
+    if not db.delete_device(device_id):
+        raise HTTPException(status_code=404, detail="not found")
+    return {"deleted": device_id}
 
 
 @app.get("/api/v1/auth/captcha")
@@ -514,9 +612,8 @@ async def ws(websocket: WebSocket, token: str = ""):
         payload = decode_token(token)
         if payload.get("typ", "access") != "access":
             raise ValueError("wrong token type")
-        user = db.get_user(int(payload["sub"]))
-        if not user or user["disabled"]:
-            raise ValueError("user gone")
+        if not _resolve_subject(payload):
+            raise ValueError("user/device gone")
     except Exception:
         await websocket.close(code=4401)
         return
@@ -538,9 +635,8 @@ async def ws_agent(websocket: WebSocket, token: str = ""):
         payload = decode_token(token)
         if payload.get("typ", "access") != "access":
             raise ValueError("wrong token type")
-        user = db.get_user(int(payload["sub"]))
-        if not user or user["disabled"]:
-            raise ValueError("user gone")
+        if not _resolve_subject(payload):
+            raise ValueError("user/device gone")
     except Exception:
         await websocket.close(code=4401)
         return

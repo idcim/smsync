@@ -1,6 +1,6 @@
 ﻿; SMSync Agent Windows 安装包脚本（用 makensis.exe 编译，见 build_installer.sh）
 !define APP_NAME "SMSync Agent"
-!define APP_VERSION "1.1.0"
+!define APP_VERSION "1.2.0"
 !define APP_EXE "smsync-agent.exe"
 !define APP_ID "SMSyncAgent"
 !define PUBLISHER "SMSync"
@@ -27,7 +27,7 @@ Section "主程序（必选）" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "dist\${APP_EXE}"
-  ; 已有 config.ini 则保留用户配置，否则装模板（用户再改 token/端口）
+  ; 已有 config.ini 则保留用户配置，否则装模板（用户再填设备码/端口）
   IfFileExists "$INSTDIR\config.ini" config_done
   File "/oname=config.ini" "config.example.ini"
 config_done:
