@@ -192,7 +192,7 @@ class Modem:
             return []
         return parse_cmgl(lines)
 
-    def send_sms(self, number: str, text: str, timeout: float = 30.0) -> tuple[bool, str]:
+    def send_sms(self, number: str, text: str, timeout: float = 60.0) -> tuple[bool, str]:
         """UCS2 文本模式发短信（参考 agent_rpi/modem.py）。返回 (ok, 错误或 +CMGS 引用)。"""
         da = number.encode("utf-16-be").hex().upper()
         body = text.encode("utf-16-be").hex().upper()

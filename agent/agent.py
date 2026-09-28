@@ -29,7 +29,7 @@ from modem import Modem
 from outbox import Outbox
 from uplink import Uplink
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后：数据与配置放 %APPDATA%（Program Files 不可写）
@@ -503,7 +503,26 @@ class SettingsWindow:
         poll_status()
 
 
+def ensure_single_instance() -> bool:
+    """Windows 命名互斥锁防止多开（多开会抢占同一个串口）。已运行返回 False。"""
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\SMSyncAgentSingleton")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        return False
+    return True
+
+
 def main():
+    if not ensure_single_instance():
+        # 已有一个实例在跑：弹个提示就退出
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0, "SMSync Agent 已在运行中（右下角托盘图标），请勿重复启动。",
+                "SMSync Agent", 0x40)
+        return
     log.info("smsync-agent v%s starting (data dir: %s)", __version__, DATA_DIR)
     cmd_queue: queue.Queue = queue.Queue()
     icon_holder: dict = {}

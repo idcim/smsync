@@ -628,10 +628,12 @@ async def send_sms(payload: SmsSendIn, user: dict = Depends(current_user)):
     try:
         ack = await agent_channel.command(
             device_id, "send_sms", to=payload.to, text=payload.text,
-            client_msg_id=row["client_msg_id"])
+            client_msg_id=row["client_msg_id"], timeout=75.0)
         ok, error = bool(ack.get("ok")), ack.get("error")
     except AgentOffline:
         ok, error = False, "agent offline"
+    except asyncio.TimeoutError:
+        ok, error = False, "device no response"
     row = db.update_outbox_status(row["client_msg_id"], "sent" if ok else "failed", error)
     row["device_id"] = device_id
     await hub.broadcast(json.dumps({"type": "sms_sent", "data": row}, ensure_ascii=False),
@@ -678,6 +680,8 @@ async def dial(payload: DialIn, user: dict = Depends(current_user)):
         ack = await agent_channel.command(device_id, "dial", number=payload.number)
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="device no response")
     if not ack.get("ok"):
         raise HTTPException(status_code=502, detail=ack.get("error") or "dial failed")
     return ack
@@ -691,6 +695,8 @@ async def answer_call(payload: Optional[DeviceTargetIn] = None,
         ack = await agent_channel.command(device_id, "answer")
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="device no response")
     if not ack.get("ok"):
         raise HTTPException(status_code=502, detail=ack.get("error") or "answer failed")
     return ack
@@ -704,6 +710,8 @@ async def hangup_call(payload: Optional[DeviceTargetIn] = None,
         ack = await agent_channel.command(device_id, "hangup")
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="device no response")
     if not ack.get("ok"):
         raise HTTPException(status_code=502, detail=ack.get("error") or "hangup failed")
     return ack
