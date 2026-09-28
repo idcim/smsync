@@ -7,7 +7,7 @@
           <el-icon><User /></el-icon>
           <span>用户管理</span>
         </el-menu-item>
-        <el-menu-item v-if="isAdmin()" index="/devices">
+        <el-menu-item index="/devices">
           <el-icon><Monitor /></el-icon>
           <span>设备管理</span>
         </el-menu-item>

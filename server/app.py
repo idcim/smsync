@@ -55,6 +55,7 @@ class SmsIn(BaseModel):
 class SmsSendIn(BaseModel):
     to: str = Field(pattern=PHONE_PATTERN)
     text: str = Field(min_length=1, max_length=2000)
+    device_id: Optional[int] = None  # 多设备在线时指定目标设备
 
 
 class CallEventIn(BaseModel):
@@ -70,6 +71,7 @@ class CallEventIn(BaseModel):
 
 class DialIn(BaseModel):
     number: str = Field(pattern=PHONE_PATTERN)
+    device_id: Optional[int] = None  # 多设备在线时指定目标设备
 
 
 class LoginIn(BaseModel):
@@ -113,7 +115,8 @@ def _resolve_subject(payload: dict) -> Optional[dict]:
             return None
         if not dev or dev["disabled"]:
             return None
-        return {"id": dev["id"], "username": dev["name"], "role": "device", "device": True}
+        return {"id": dev["id"], "username": dev["name"], "role": "device",
+                "device": True, "owner_id": dev["owner_id"]}
     try:
         user = db.get_user(int(sub))
     except ValueError:
@@ -154,6 +157,50 @@ def public_user(user: dict) -> dict:
     return {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
+# ---- 数据隔离：设备归属用户，用户只见自己设备的数据；admin 全量 ----
+
+def visible_device_ids(subject: dict) -> Optional[set[int]]:
+    """None = 全部可见（admin）；集合 = 只能看这些设备的数据（可能为空集）。"""
+    if subject["role"] == "admin":
+        return None
+    if subject.get("device"):
+        return {subject["id"]}
+    return db.owned_device_ids(subject["id"])
+
+
+def can_access_row(subject: dict, row: Optional[dict]) -> bool:
+    """行级访问控制。device_id 为 NULL 的遗留数据只有 admin 可见。"""
+    if not row:
+        return False
+    ids = visible_device_ids(subject)
+    if ids is None:
+        return True
+    return row.get("device_id") in ids
+
+
+def can_manage_device(subject: dict, dev: Optional[dict]) -> bool:
+    """设备管理权限：admin 全部，用户只能管自己名下的设备。"""
+    if not dev:
+        return False
+    return subject["role"] == "admin" or dev.get("owner_id") == subject["id"]
+
+
+def resolve_command_device(subject: dict, device_id: Optional[int]) -> int:
+    """确定下行指令的目标设备：显式指定则校验归属；未指定时若只有一台
+    在线设备则自动用它，多在线报 400 要求指定。"""
+    ids = visible_device_ids(subject)
+    if device_id is not None:
+        if ids is not None and device_id not in ids:
+            raise HTTPException(status_code=403, detail="not your device")
+        return device_id
+    online = [d for d in agent_channel.online_ids() if ids is None or d in ids]
+    if not online:
+        raise HTTPException(status_code=503, detail="no device online")
+    if len(online) > 1:
+        raise HTTPException(status_code=400, detail="multiple devices online, specify device_id")
+    return online[0]
+
+
 # ---- 登录限流：同一 用户名+IP 连续失败 5 次锁 60 秒 ----
 
 _login_fails: dict[tuple[str, str], tuple[int, float]] = {}
@@ -189,22 +236,31 @@ bootstrap_admin()
 
 
 class WsHub:
+    """客户端推送。每个连接记录其身份，广播按数据归属过滤：
+    admin 全收；普通用户/设备只收自己设备的事件；无归属的遗留事件只发 admin。"""
+
     def __init__(self):
-        self._clients: set[WebSocket] = set()
+        self._clients: dict[WebSocket, dict] = {}  # ws -> subject
         self._lock = asyncio.Lock()
 
-    async def add(self, ws: WebSocket):
+    async def add(self, ws: WebSocket, subject: dict):
         async with self._lock:
-            self._clients.add(ws)
+            self._clients[ws] = subject
 
     async def remove(self, ws: WebSocket):
         async with self._lock:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
 
-    async def broadcast(self, message: str):
+    async def broadcast(self, message: str, device_id: Optional[int] = None):
         async with self._lock:
-            clients = list(self._clients)
-        for ws in clients:
+            clients = list(self._clients.items())
+        for ws, subject in clients:
+            if subject["role"] == "admin":
+                pass  # admin 全收
+            elif device_id is not None and device_id in (visible_device_ids(subject) or set()):
+                pass
+            else:
+                continue
             try:
                 await ws.send_text(message)
             except Exception:
@@ -220,40 +276,41 @@ class AgentOffline(Exception):
 
 
 class AgentChannel:
-    """Downlink to the modem agent (RPi). The agent keeps one persistent WS
-    at /ws/agent; client commands are forwarded and answered by ack id."""
+    """采集端下行通道。每台设备一条持久 WS（/ws/agent），指令按设备路由，
+    回答用 ack id 对应。"""
 
     def __init__(self):
-        self.ws: Optional[WebSocket] = None
-        self.pending: dict[str, asyncio.Future] = {}
+        self.channels: dict[int, WebSocket] = {}          # device_id -> ws
+        self.pending: dict[str, tuple[int, asyncio.Future]] = {}
 
-    @property
-    def online(self) -> bool:
-        return self.ws is not None
+    def online_ids(self) -> list[int]:
+        return list(self.channels.keys())
 
-    async def attach(self, ws: WebSocket):
-        if self.ws is not None:
+    async def attach(self, ws: WebSocket, device_id: int):
+        old = self.channels.get(device_id)
+        if old is not None:
             with contextlib.suppress(Exception):
-                await self.ws.close(code=4000)
-        self.ws = ws
+                await old.close(code=4000)
+        self.channels[device_id] = ws
 
-    def detach(self, ws: WebSocket):
-        if self.ws is ws:
-            self.ws = None
-            for fut in self.pending.values():
-                if not fut.done():
+    def detach(self, ws: WebSocket, device_id: int):
+        if self.channels.get(device_id) is ws:
+            self.channels.pop(device_id, None)
+            for cmd_id, (dev_id, fut) in list(self.pending.items()):
+                if dev_id == device_id and not fut.done():
                     fut.set_exception(AgentOffline("agent disconnected"))
-            self.pending.clear()
+                    self.pending.pop(cmd_id, None)
 
-    async def command(self, action: str, timeout: float = 20.0, **params) -> dict:
-        if not self.ws:
+    async def command(self, device_id: int, action: str, timeout: float = 20.0, **params) -> dict:
+        ws = self.channels.get(device_id)
+        if ws is None:
             raise AgentOffline()
         cmd_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self.pending[cmd_id] = fut
+        self.pending[cmd_id] = (device_id, fut)
         try:
-            await self.ws.send_text(json.dumps(
+            await ws.send_text(json.dumps(
                 {"id": cmd_id, "action": action, **params}, ensure_ascii=False))
             return await asyncio.wait_for(fut, timeout)
         finally:
@@ -262,7 +319,7 @@ class AgentChannel:
     def handle_message(self, data: dict):
         ack_id = data.get("ack")
         if ack_id and ack_id in self.pending:
-            fut = self.pending[ack_id]
+            _, fut = self.pending[ack_id]
             if not fut.done():
                 fut.set_result(data)
 
@@ -312,11 +369,13 @@ class DeviceLoginIn(BaseModel):
 
 class DeviceCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=50)
+    owner_id: Optional[int] = None  # 仅 admin 可指定他人；省略则归属自己
 
 
 class DeviceUpdateIn(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=50)
     disabled: Optional[bool] = None
+    owner_id: Optional[int] = None  # 仅 admin 可改（显式传 null 解绑）
 
 
 def _device_key_hash(device_key: str) -> str:
@@ -353,47 +412,69 @@ def device_login(payload: DeviceLoginIn, request: Request):
     })
 
 
-# ---- 设备管理（仅 admin） ----
+# ---- 设备管理（admin 管全部；普通用户管自己名下的） ----
 
 @app.get("/api/v1/devices")
-def list_devices(_: dict = Depends(require_admin)):
-    return {"items": db.list_devices()}
+def list_devices(user: dict = Depends(current_user)):
+    if user["role"] == "admin":
+        return {"items": db.list_devices()}
+    if user.get("device"):
+        return {"items": []}  # 设备身份不需要管理设备
+    return {"items": db.list_devices(owner_id=user["id"])}
 
 
 @app.post("/api/v1/devices", status_code=201)
-def create_device(payload: DeviceCreateIn, _: dict = Depends(require_admin)):
+def create_device(payload: DeviceCreateIn, user: dict = Depends(current_user)):
+    if user.get("device"):
+        raise HTTPException(status_code=403, detail="device cannot create devices")
+    owner_id = user["id"]
+    if payload.owner_id is not None:
+        if user["role"] != "admin":
+            raise HTTPException(status_code=403, detail="only admin can assign owner")
+        if not db.get_user(payload.owner_id):
+            raise HTTPException(status_code=400, detail="owner user not found")
+        owner_id = payload.owner_id
     # 设备码在设备首次上线前可在列表中查看；设备认证成功后服务端清除明文
     device_key = "smsk_" + secrets.token_urlsafe(24)
-    return db.create_device(payload.name, _device_key_hash(device_key), device_key)
+    return db.create_device(payload.name, _device_key_hash(device_key), device_key, owner_id)
 
 
 @app.patch("/api/v1/devices/{device_id}")
-def update_device(device_id: int, payload: DeviceUpdateIn, _: dict = Depends(require_admin)):
+def update_device(device_id: int, payload: DeviceUpdateIn, user: dict = Depends(current_user)):
     dev = db.get_device(device_id)
-    if not dev:
+    if not dev or not can_manage_device(user, dev):
         raise HTTPException(status_code=404, detail="not found")
     fields = {}
     if payload.name is not None:
         fields["name"] = payload.name
     if payload.disabled is not None:
         fields["disabled"] = 1 if payload.disabled else 0
+    if "owner_id" in payload.model_fields_set:
+        if user["role"] != "admin":
+            raise HTTPException(status_code=403, detail="only admin can reassign owner")
+        if payload.owner_id is not None and not db.get_user(payload.owner_id):
+            raise HTTPException(status_code=400, detail="owner user not found")
+        fields["owner_id"] = payload.owner_id
     return db.update_device(device_id, **fields)
 
 
 @app.post("/api/v1/devices/{device_id}/regenerate")
-def regenerate_device_key(device_id: int, _: dict = Depends(require_admin)):
+def regenerate_device_key(device_id: int, user: dict = Depends(current_user)):
     """重置设备码：旧码立即失效，返回新码（同样只在设备下次使用前可见）。
     用于设备码丢失（如创建弹窗被误关）时的找回。"""
-    if not db.get_device(device_id):
+    dev = db.get_device(device_id)
+    if not dev or not can_manage_device(user, dev):
         raise HTTPException(status_code=404, detail="not found")
     device_key = "smsk_" + secrets.token_urlsafe(24)
     return db.regenerate_device_key(device_id, _device_key_hash(device_key), device_key)
 
 
 @app.delete("/api/v1/devices/{device_id}")
-def delete_device(device_id: int, _: dict = Depends(require_admin)):
-    if not db.delete_device(device_id):
+def delete_device(device_id: int, user: dict = Depends(current_user)):
+    dev = db.get_device(device_id)
+    if not dev or not can_manage_device(user, dev):
         raise HTTPException(status_code=404, detail="not found")
+    db.delete_device(device_id)
     return {"deleted": device_id}
 
 
@@ -477,86 +558,107 @@ def delete_user(user_id: int, admin: dict = Depends(require_admin)):
     return {"deleted": user_id}
 
 
-@app.post("/api/v1/sms", status_code=201, dependencies=[Depends(current_user)])
-async def create_sms(payload: SmsIn):
+@app.post("/api/v1/sms", status_code=201)
+async def create_sms(payload: SmsIn, user: dict = Depends(current_user)):
+    # 设备上报时打上设备归属；用户手动上报（不常见）无归属，仅 admin 可见
+    device_id = user["id"] if user.get("device") else None
     row, created = db.insert_sms(
         sender=payload.sender,
         text=payload.text,
         received_at=payload.received_at,
         client_msg_id=payload.client_msg_id,
+        device_id=device_id,
     )
     if created:
-        await hub.broadcast(to_event(row))
+        await hub.broadcast(to_event(row), device_id=row["device_id"])
     return row
 
 
-@app.get("/api/v1/sms", dependencies=[Depends(current_user)])
+@app.get("/api/v1/sms")
 def list_sms(
     limit: int = Query(default=50, ge=1, le=500),
     before_id: Optional[int] = None,
+    user: dict = Depends(current_user),
 ):
-    return {"items": db.list_sms(limit=limit, before_id=before_id)}
+    return {"items": db.list_sms(limit=limit, before_id=before_id,
+                                 device_ids=visible_device_ids(user))}
 
 
-@app.get("/api/v1/sms/{sms_id}", dependencies=[Depends(current_user)])
-def get_sms(sms_id: int):
+@app.get("/api/v1/sms/{sms_id}")
+def get_sms(sms_id: int, user: dict = Depends(current_user)):
     row = db.get_sms(sms_id)
-    if not row:
+    if not can_access_row(user, row):
         raise HTTPException(status_code=404, detail="not found")
     return row
 
 
-@app.delete("/api/v1/sms/{sms_id}", dependencies=[Depends(current_user)])
-async def delete_sms(sms_id: int):
-    if not db.delete_sms(sms_id):
+@app.delete("/api/v1/sms/{sms_id}")
+async def delete_sms(sms_id: int, user: dict = Depends(current_user)):
+    row = db.get_sms(sms_id)
+    if not can_access_row(user, row):
         raise HTTPException(status_code=404, detail="not found")
-    await hub.broadcast(json.dumps({"type": "delete", "data": {"id": sms_id}}))
+    db.delete_sms(sms_id)
+    await hub.broadcast(json.dumps({"type": "delete", "data": {"id": sms_id}}),
+                        device_id=row["device_id"])
     return {"deleted": sms_id}
 
 
 # ---- sms sending (downlink via agent) ----
 
-@app.post("/api/v1/sms/send", dependencies=[Depends(current_user)])
-async def send_sms(payload: SmsSendIn):
-    row = db.insert_outbox_sms(uuid.uuid4().hex, payload.to, payload.text)
+@app.post("/api/v1/sms/send")
+async def send_sms(payload: SmsSendIn, user: dict = Depends(current_user)):
+    device_id = resolve_command_device(user, payload.device_id)
+    row = db.insert_outbox_sms(uuid.uuid4().hex, payload.to, payload.text, device_id)
     try:
         ack = await agent_channel.command(
-            "send_sms", to=payload.to, text=payload.text,
+            device_id, "send_sms", to=payload.to, text=payload.text,
             client_msg_id=row["client_msg_id"])
         ok, error = bool(ack.get("ok")), ack.get("error")
     except AgentOffline:
         ok, error = False, "agent offline"
     row = db.update_outbox_status(row["client_msg_id"], "sent" if ok else "failed", error)
-    await hub.broadcast(json.dumps({"type": "sms_sent", "data": row}, ensure_ascii=False))
+    await hub.broadcast(json.dumps({"type": "sms_sent", "data": row}, ensure_ascii=False),
+                        device_id=device_id)
     if not ok:
         raise HTTPException(status_code=503 if error == "agent offline" else 502,
                             detail=error or "send failed")
     return row
 
 
-@app.get("/api/v1/sms/outbox/list", dependencies=[Depends(current_user)])
-def list_outbox(limit: int = Query(default=50, ge=1, le=500)):
-    return {"items": db.list_outbox_sms(limit=limit)}
+@app.get("/api/v1/sms/outbox/list")
+def list_outbox(limit: int = Query(default=50, ge=1, le=500),
+                user: dict = Depends(current_user)):
+    return {"items": db.list_outbox_sms(limit=limit, device_ids=visible_device_ids(user))}
 
 
 # ---- calls ----
 
-@app.post("/api/v1/calls", status_code=201, dependencies=[Depends(current_user)])
-async def report_call(event: CallEventIn):
-    row = db.upsert_call(event.client_msg_id, **event.model_dump(exclude={"client_msg_id"}))
-    await hub.broadcast(json.dumps({"type": "call", "data": row}, ensure_ascii=False))
+@app.post("/api/v1/calls", status_code=201)
+async def report_call(event: CallEventIn, user: dict = Depends(current_user)):
+    fields = event.model_dump(exclude={"client_msg_id"})
+    if user.get("device"):
+        fields["device_id"] = user["id"]
+    row = db.upsert_call(event.client_msg_id, **fields)
+    await hub.broadcast(json.dumps({"type": "call", "data": row}, ensure_ascii=False),
+                        device_id=row["device_id"])
     return row
 
 
-@app.get("/api/v1/calls", dependencies=[Depends(current_user)])
-def list_calls(limit: int = Query(default=50, ge=1, le=500)):
-    return {"items": db.list_calls(limit=limit)}
+@app.get("/api/v1/calls")
+def list_calls(limit: int = Query(default=50, ge=1, le=500),
+               user: dict = Depends(current_user)):
+    return {"items": db.list_calls(limit=limit, device_ids=visible_device_ids(user))}
 
 
-@app.post("/api/v1/calls/dial", dependencies=[Depends(current_user)])
-async def dial(payload: DialIn):
+class DeviceTargetIn(BaseModel):
+    device_id: Optional[int] = None
+
+
+@app.post("/api/v1/calls/dial")
+async def dial(payload: DialIn, user: dict = Depends(current_user)):
+    device_id = resolve_command_device(user, payload.device_id)
     try:
-        ack = await agent_channel.command("dial", number=payload.number)
+        ack = await agent_channel.command(device_id, "dial", number=payload.number)
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
     if not ack.get("ok"):
@@ -564,10 +666,12 @@ async def dial(payload: DialIn):
     return ack
 
 
-@app.post("/api/v1/calls/answer", dependencies=[Depends(current_user)])
-async def answer_call():
+@app.post("/api/v1/calls/answer")
+async def answer_call(payload: Optional[DeviceTargetIn] = None,
+                      user: dict = Depends(current_user)):
+    device_id = resolve_command_device(user, payload.device_id if payload else None)
     try:
-        ack = await agent_channel.command("answer")
+        ack = await agent_channel.command(device_id, "answer")
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
     if not ack.get("ok"):
@@ -575,10 +679,12 @@ async def answer_call():
     return ack
 
 
-@app.post("/api/v1/calls/hangup", dependencies=[Depends(current_user)])
-async def hangup_call():
+@app.post("/api/v1/calls/hangup")
+async def hangup_call(payload: Optional[DeviceTargetIn] = None,
+                      user: dict = Depends(current_user)):
+    device_id = resolve_command_device(user, payload.device_id if payload else None)
     try:
-        ack = await agent_channel.command("hangup")
+        ack = await agent_channel.command(device_id, "hangup")
     except AgentOffline:
         raise HTTPException(status_code=503, detail="agent offline")
     if not ack.get("ok"):
@@ -586,9 +692,10 @@ async def hangup_call():
     return ack
 
 
-@app.post("/api/v1/calls/{call_id}/recording", dependencies=[Depends(current_user)])
-async def upload_recording(call_id: int, request: Request):
-    if not db.get_call(call_id):
+@app.post("/api/v1/calls/{call_id}/recording")
+async def upload_recording(call_id: int, request: Request, user: dict = Depends(current_user)):
+    call = db.get_call(call_id)
+    if not can_access_row(user, call):
         raise HTTPException(status_code=404, detail="not found")
     if request.headers.get("content-length"):
         if int(request.headers["content-length"]) > MAX_RECORDING_BYTES:
@@ -601,14 +708,15 @@ async def upload_recording(call_id: int, request: Request):
     filename = f"call_{call_id}.wav"
     (RECORDINGS_DIR / filename).write_bytes(data)
     row = db.set_recording(call_id, filename)
-    await hub.broadcast(json.dumps({"type": "call", "data": row}, ensure_ascii=False))
+    await hub.broadcast(json.dumps({"type": "call", "data": row}, ensure_ascii=False),
+                        device_id=row["device_id"])
     return {"ok": True, "size": len(data)}
 
 
-@app.get("/api/v1/calls/{call_id}/recording", dependencies=[Depends(current_user)])
-def get_recording(call_id: int):
+@app.get("/api/v1/calls/{call_id}/recording")
+def get_recording(call_id: int, user: dict = Depends(current_user)):
     call = db.get_call(call_id)
-    if not call or not call.get("recording_file"):
+    if not can_access_row(user, call) or not call.get("recording_file"):
         raise HTTPException(status_code=404, detail="no recording")
     path = RECORDINGS_DIR / call["recording_file"]
     if not path.exists():
@@ -622,13 +730,14 @@ async def ws(websocket: WebSocket, token: str = ""):
         payload = decode_token(token)
         if payload.get("typ", "access") != "access":
             raise ValueError("wrong token type")
-        if not _resolve_subject(payload):
+        subject = _resolve_subject(payload)
+        if not subject:
             raise ValueError("user/device gone")
     except Exception:
         await websocket.close(code=4401)
         return
     await websocket.accept()
-    await hub.add(websocket)
+    await hub.add(websocket, subject)
     try:
         while True:
             # Keep the connection alive; clients may send pings we ignore.
@@ -645,14 +754,22 @@ async def ws_agent(websocket: WebSocket, token: str = ""):
         payload = decode_token(token)
         if payload.get("typ", "access") != "access":
             raise ValueError("wrong token type")
-        if not _resolve_subject(payload):
+        subject = _resolve_subject(payload)
+        if not subject:
             raise ValueError("user/device gone")
     except Exception:
         await websocket.close(code=4401)
         return
+    if not subject.get("device"):
+        # 指令通道只允许设备身份接入
+        await websocket.close(code=4403)
+        return
+    device_id = subject["id"]
     await websocket.accept()
-    await agent_channel.attach(websocket)
-    await hub.broadcast(json.dumps({"type": "agent", "data": {"online": True}}))
+    await agent_channel.attach(websocket, device_id)
+    await hub.broadcast(json.dumps({"type": "agent", "data": {
+        "online": True, "device_id": device_id, "device_name": subject["username"],
+    }}, ensure_ascii=False), device_id=device_id)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -663,8 +780,10 @@ async def ws_agent(websocket: WebSocket, token: str = ""):
     except WebSocketDisconnect:
         pass
     finally:
-        agent_channel.detach(websocket)
-        await hub.broadcast(json.dumps({"type": "agent", "data": {"online": False}}))
+        agent_channel.detach(websocket, device_id)
+        await hub.broadcast(json.dumps({"type": "agent", "data": {
+            "online": False, "device_id": device_id, "device_name": subject["username"],
+        }}, ensure_ascii=False), device_id=device_id)
 
 
 @app.get("/", include_in_schema=False)

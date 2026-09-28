@@ -138,8 +138,8 @@ docker compose up -d
 | POST | `/api/v1/auth/token` | 机器客户端登录 `{username, password}`（免验证码，同样限流） |
 | POST | `/api/v1/auth/device` | 采集端设备码登录 `{device_key}`（免验证码，限流；设备禁用即 401） |
 | POST | `/api/v1/auth/refresh` | 用 refresh_token 换新 token 对（无状态续期；客户端只存 token 不存密码） |
-| GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（仅 admin；设备码仅设备未使用时可见，首次认证后服务端清除明文） |
-| PATCH/DELETE | `/api/v1/devices/{id}` | 重命名/启禁用、删除设备（仅 admin；禁用删除后其 token 立即失效） |
+| GET/POST | `/api/v1/devices` | 设备列表 / 创建设备（admin 全量并可指定 `owner_id` 归属；普通用户只见/建自己名下的） |
+| PATCH/DELETE | `/api/v1/devices/{id}` | 重命名/启禁用/改归属（`owner_id`，仅 admin）、删除（admin 或属主） |
 | POST | `/api/v1/devices/{id}/regenerate` | 重置设备码（仅 admin；旧码立即失效，新码在设备使用前可见——用于设备码丢失找回） |
 | GET | `/api/v1/auth/me` | 当前登录用户信息 |
 | POST | `/api/v1/auth/change_password` | 修改自己的密码 `{old_password, new_password}` |
@@ -150,13 +150,13 @@ docker compose up -d
 | GET | `/api/v1/sms?limit=&before_id=` | 分页拉取（倒序） |
 | GET | `/api/v1/sms/{id}` | 单条详情 |
 | DELETE | `/api/v1/sms/{id}` | 删除短信，并广播 `{"type":"delete","data":{"id":N}}` 让各客户端实时移除 |
-| POST | `/api/v1/sms/send` | 发短信 `{to, text}`（经 agent 下行执行，结果写入发件箱） |
+| POST | `/api/v1/sms/send` | 发短信 `{to, text, device_id?}`（经指定设备下行执行；不指定且仅一台在线时自动路由） |
 | GET | `/api/v1/sms/outbox/list` | 发件箱（sent/failed/pending） |
 | POST | `/api/v1/calls` | agent 上报通话事件（按 `client_msg_id` 幂等 upsert） |
 | GET | `/api/v1/calls` | 通话记录 |
-| POST | `/api/v1/calls/dial` `/answer` `/hangup` | 呼叫控制（转发 agent，agent 离线返回 503） |
+| POST | `/api/v1/calls/dial` `/answer` `/hangup` | 呼叫控制（可带 `device_id` 指定设备；多设备在线不指定返回 400） |
 | POST/GET | `/api/v1/calls/{id}/recording` | 上传 / 播放通话录音（WAV） |
-| WS | `/ws?token=<JWT>` | 客户端推送：`sms` / `delete` / `call` / `sms_sent` / `agent` |
+| WS | `/ws?token=<JWT>` | 客户端推送（**按设备归属过滤**：用户只收自己设备的事件）：`sms` / `delete` / `call` / `sms_sent` / `agent`（agent 事件含 `device_id`/`device_name`） |
 | WS | `/ws/agent?token=<JWT>` | agent 指令通道（下行命令 + ack） |
 
 ## 语音通话（树莓派）

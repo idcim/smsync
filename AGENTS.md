@@ -80,8 +80,9 @@ cd /opt/smsync && ./deploy.sh
 
 - Python 为主；**无 lint 配置、无测试框架** —— 改动后手动跑通对应组件验证（起服务器 / 跑 agent / `npm start`）
 - 注释、文档、commit message 用中文
-- 上报类接口保持幂等：客户端生成 `client_msg_id`，服务端据此去重/upsert
-- 任何导致数据变化的接口（新短信、删除、通话事件、发送结果）必须向 `/ws` 广播对应消息，让客户端实时同步
+- 上报类接口保持幂等：客户端生成 `client_msg_id`，服务端据此去重/upsert（注意：重复上报不会再次广播）
+- **多租户隔离**：设备有 `owner_id`（归属用户）；短信/通话/发件箱行带 `device_id`；admin 全量可见，普通用户只见自己设备的数据，`device_id` 为 NULL 的遗留数据仅 admin 可见；WS 广播按归属过滤；下行指令按设备路由（`/ws/agent` 只允许设备身份接入）
+- 任何导致数据变化的接口（新短信、删除、通话事件、发送结果）必须向 `/ws` 广播对应消息（带归属过滤），让客户端实时同步
 - WS 消息类型：`sms` / `delete` / `call` / `sms_sent` / `agent`
 - 版本号三处：服务端 `server/config.py` 的 `APP_VERSION`（health 接口暴露）、Electron `client_electron/package.json`（标题栏/设置页显示，客户端据此比对 health 版本提示更新）、采集端 `agent/agent.py` 的 `__version__` + `agent/installer.nsi` 的 `APP_VERSION`（两处同步）
 

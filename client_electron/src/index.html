@@ -73,11 +73,15 @@
   .call audio { height: 28px; width: 200px; }
   .recbtn { border: 1px solid #30363d; background: #21262d; color: #e6edf3; border-radius: 6px;
             padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  /* 设备下拉选择器 + 条目上的设备名小字 */
+  .devsel { padding: 8px 10px; border-radius: 6px; border: 1px solid #30363d;
+            background: #0d1117; color: #e6edf3; font-size: 13px; outline: none; }
+  .dev { font-size: 11px; color: #6e7681; font-weight: 400; }
   /* send */
   #tabSend { flex-direction: column; overflow-y: auto; padding: 14px; }
   .sendform { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
               padding: 14px; margin-bottom: 14px; }
-  .sendform input, .sendform textarea { width: 100%; padding: 9px; border-radius: 6px;
+  .sendform input, .sendform textarea, .sendform select { width: 100%; padding: 9px; border-radius: 6px;
               border: 1px solid #30363d; background: #0d1117; color: #e6edf3;
               font-size: 14px; outline: none; margin-bottom: 10px; }
   .sendform textarea { height: 90px; resize: vertical; }
@@ -153,6 +157,7 @@
     </div>
     <div class="dialrow">
       <input id="dialNum" placeholder="输入号码拨打电话…">
+      <select class="devsel" id="dialDevice" title="选择拨号设备"></select>
       <button class="green" id="dialBtn">拨打</button>
     </div>
     <div id="callList"></div>
@@ -161,6 +166,7 @@
     <div class="sendform">
       <input id="sendTo" placeholder="收件人号码，如 +8613800138000">
       <textarea id="sendText" placeholder="短信内容（支持中文）"></textarea>
+      <select class="devsel" id="sendDevice" title="选择发送设备"></select>
       <button id="sendBtn">发送</button>
     </div>
     <div id="outList"></div>
@@ -265,6 +271,58 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'tabSend') loadOutbox();
 });
 
+// ---- devices ----
+let devices = [];        // 当前用户名下的设备列表
+let deviceOnline = {};   // device_id -> 在线状态，由 agent WS 事件维护
+function devName(id) {
+  // 只有多台设备时才在条目上显示设备名，单设备不打扰
+  if (id == null || devices.length < 2) return '';
+  const d = devices.find(x => x.id === id);
+  return d ? (d.name || '设备 ' + d.id) : '';
+}
+function renderAgentState() {
+  const total = devices.length;
+  const online = devices.filter(d => deviceOnline[d.id]).length;
+  $('agentState').textContent = total ? `设备在线 ${online}/${total}` : '模块离线';
+  $('agentState').classList.toggle('on', online > 0);
+}
+function renderDeviceSelects() {
+  const opts = devices.map(d =>
+    `<option value="${d.id}">${esc(d.name || '设备 ' + d.id)}（${deviceOnline[d.id] ? '在线' : '离线'}）</option>`
+  ).join('');
+  for (const id of ['dialDevice', 'sendDevice']) {
+    const sel = $(id);
+    const cur = sel.value;
+    sel.innerHTML = opts || '<option value="">（暂无设备）</option>';
+    // 列表刷新后尽量保留原选择
+    if (cur && devices.some(d => String(d.id) === cur)) sel.value = cur;
+  }
+}
+async function loadDevices() {
+  try {
+    const data = await api('/api/v1/devices');
+    devices = Array.isArray(data) ? data : (data.items || []);
+    // 还没收到 WS 事件时，用 last_seen_at 粗判在线（90 秒内有心跳）
+    const now = Date.now();
+    for (const d of devices) {
+      if (!(d.id in deviceOnline)) {
+        deviceOnline[d.id] = !!d.last_seen_at && now - new Date(d.last_seen_at).getTime() < 90000;
+      }
+    }
+    renderDeviceSelects();
+    renderAgentState();
+  } catch (e) { /* 设备列表加载失败保持原样 */ }
+}
+// 选中的设备 id；空值则不传，由服务端自动路由
+function selectedDevice(selId) {
+  const v = $(selId).value;
+  return v ? Number(v) : undefined;
+}
+// 多台在线设备未指定时服务端返回 400，引导用户用下拉选择
+function devErr(e) {
+  return /device_id|multiple devices/i.test(e.message) ? e.message + '（请在上方选择设备）' : e.message;
+}
+
 // ---- sms tab ----
 function filtered() {
   if (!keyword) return items;
@@ -274,12 +332,15 @@ function filtered() {
 }
 function renderList() {
   const data = filtered();
-  $('list').innerHTML = data.map(it => `
+  $('list').innerHTML = data.map(it => {
+    const dn = devName(it.device_id);
+    return `
     <div class="item ${it.id === selectedId ? 'active' : ''}" data-id="${it.id}">
       <span class="t">${esc(fmt(it.received_at || it.created_at))}</span>
-      <div class="s">${esc(it.sender)}</div>
+      <div class="s">${esc(it.sender)}${dn ? ` <span class="dev">${esc(dn)}</span>` : ''}</div>
       <div class="p">${esc(it.text)}</div>
-    </div>`).join('') || '<div class="empty" style="margin-top:40px">没有匹配的短信</div>';
+    </div>`;
+  }).join('') || '<div class="empty" style="margin-top:40px">没有匹配的短信</div>';
   document.querySelectorAll('.item').forEach(el =>
     el.onclick = () => select(Number(el.dataset.id)));
 }
@@ -342,11 +403,12 @@ function renderCalls() {
   $('callList').innerHTML = calls.map(c => {
     const missed = c.status === 'missed' || c.status === 'failed';
     const dur = c.duration != null ? `${c.duration}s` : (CALL_STATUS[c.status] || c.status);
+    const dn = devName(c.device_id);
     return `<div class="call">
       <span class="ico">${CALL_ICONS[c.direction] || '📞'}</span>
       <span class="num ${missed ? 'missed' : ''}">${esc(c.number || '未知号码')}</span>
       ${c.recording_file ? `<button class="recbtn" data-id="${c.id}">▶ 录音</button>` : ''}
-      <span class="meta">${esc(fmt(c.started_at || c.created_at))}<br>${esc(dur)}</span>
+      <span class="meta">${dn ? esc(dn) + '<br>' : ''}${esc(fmt(c.started_at || c.created_at))}<br>${esc(dur)}</span>
     </div>`;
   }).join('') || '<div class="empty">暂无通话记录</div>';
   document.querySelectorAll('.recbtn').forEach(b => b.onclick = () => playRecording(b));
@@ -376,16 +438,21 @@ function updateActiveBar() {
   }
 }
 $('actAnswer').onclick = async () => {
-  try { await api('/api/v1/calls/answer', 'POST'); } catch (e) { toast(e.message, false); }
+  // 带上通话所属设备，多台在线时服务端才能正确路由
+  const body = activeCall && activeCall.device_id != null ? { device_id: activeCall.device_id } : {};
+  try { await api('/api/v1/calls/answer', 'POST', body); } catch (e) { toast(e.message, false); }
 };
 $('actHangup').onclick = async () => {
-  try { await api('/api/v1/calls/hangup', 'POST'); } catch (e) { toast(e.message, false); }
+  const body = activeCall && activeCall.device_id != null ? { device_id: activeCall.device_id } : {};
+  try { await api('/api/v1/calls/hangup', 'POST', body); } catch (e) { toast(e.message, false); }
 };
 $('dialBtn').onclick = async () => {
   const num = $('dialNum').value.trim();
   if (!num) return;
-  try { await api('/api/v1/calls/dial', 'POST', { number: num }); $('dialNum').value = ''; }
-  catch (e) { toast('拨号失败：' + e.message, false); }
+  try {
+    await api('/api/v1/calls/dial', 'POST', { number: num, device_id: selectedDevice('dialDevice') });
+    $('dialNum').value = '';
+  } catch (e) { toast('拨号失败：' + devErr(e), false); }
 };
 function onCallEvent(c) {
   if (['ringing', 'dialing', 'alerting', 'active'].includes(c.status)) activeCall = c;
@@ -402,10 +469,10 @@ $('sendBtn').onclick = async () => {
   if (!to || !text) return;
   $('sendBtn').disabled = true;
   try {
-    await api('/api/v1/sms/send', 'POST', { to, text });
+    await api('/api/v1/sms/send', 'POST', { to, text, device_id: selectedDevice('sendDevice') });
     toast('已发送');
     $('sendText').value = '';
-  } catch (e) { toast('发送失败：' + e.message, false); }
+  } catch (e) { toast('发送失败：' + devErr(e), false); }
   $('sendBtn').disabled = false;
   loadOutbox();
 };
@@ -421,9 +488,10 @@ function renderOutbox() {
     const [cls, label] = o.status === 'sent' ? ['st-ok', '✓ 已发送']
       : o.status === 'failed' ? ['st-bad', '✗ 失败' + (o.error ? '：' + o.error : '')]
       : ['st-wait', '… 发送中'];
+    const dn = devName(o.device_id);
     return `<div class="outitem">
       <span class="tt">${esc(fmt(o.created_at))}</span>
-      <span class="to">${esc(o.recipient)}</span> <span class="${cls}">${esc(label)}</span>
+      <span class="to">${esc(o.recipient)}</span>${dn ? ` <span class="dev">${esc(dn)}</span>` : ''} <span class="${cls}">${esc(label)}</span>
       <div class="txt">${esc(o.text)}</div>
     </div>`;
   }).join('') || '<div class="empty">还没有发送记录</div>';
@@ -438,7 +506,7 @@ function onSmsSent(row) {
 $('search').oninput = e => { keyword = e.target.value.trim(); renderList(); };
 $('refreshBtn').onclick = async () => {
   setCfg(await window.smsync.getConfig());
-  loadHistory(); loadCalls(); loadOutbox();
+  loadDevices(); loadHistory(); loadCalls(); loadOutbox();
 };
 $('latestCodeBtn').onclick = e => {
   for (const it of items) {
@@ -488,19 +556,28 @@ window.smsync.onDeleted(({ id }) => removeLocal(id));
 window.smsync.onCallEvent(onCallEvent);
 window.smsync.onSmsSent(onSmsSent);
 window.smsync.onAgentStatus(s => {
-  $('agentState').textContent = s.online ? '模块在线' : '模块离线';
-  $('agentState').classList.toggle('on', !!s.online);
+  // 新结构按设备上报：{online, device_id, device_name}
+  if (s.device_id != null) {
+    deviceOnline[s.device_id] = !!s.online;
+    // 设备列表里还没有就先补一条，不等下次 loadDevices
+    if (!devices.some(d => d.id === s.device_id)) {
+      devices.push({ id: s.device_id, name: s.device_name });
+    }
+    renderDeviceSelects();
+  }
+  renderAgentState();
 });
 window.smsync.onStatus(async s => {
   $('dot').classList.toggle('on', s.connected);
   $('domain').textContent = s.domain + (s.connected ? '' : '（重连中…）');
-  if (s.connected) { setCfg(await window.smsync.getConfig()); loadHistory(); loadCalls(); }
+  if (s.connected) { setCfg(await window.smsync.getConfig()); loadDevices(); loadHistory(); loadCalls(); }
 });
 (async () => {
   setCfg(await window.smsync.getConfig());
   $('domain').textContent = cfg.domain;
   $('ver').textContent = 'v' + cfg.version;
   $('sVersion').textContent = 'SMSync v' + cfg.version;
+  loadDevices();
   loadHistory();
 })();
 </script>

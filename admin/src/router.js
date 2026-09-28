@@ -7,9 +7,10 @@ const routes = [
     path: '/',
     component: () => import('./views/Layout.vue'),
     children: [
-      { path: '', redirect: '/users' },
+      // 首页默认跳转：admin 去用户管理，普通用户去设备管理
+      { path: '', redirect: () => (isAdmin() ? '/users' : '/devices') },
       { path: 'users', name: 'users', component: () => import('./views/Users.vue'), meta: { title: '用户管理', admin: true } },
-      { path: 'devices', name: 'devices', component: () => import('./views/Devices.vue'), meta: { title: '设备管理', admin: true } },
+      { path: 'devices', name: 'devices', component: () => import('./views/Devices.vue'), meta: { title: '设备管理' } },
       { path: 'password', name: 'password', component: () => import('./views/Password.vue'), meta: { title: '修改密码' } }
     ]
   },
@@ -30,7 +31,7 @@ router.beforeEach((to) => {
     return '/login'
   }
   if (to.meta.admin && !isAdmin()) {
-    return '/password'
+    return '/devices'
   }
   return true
 })

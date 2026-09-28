@@ -8,6 +8,12 @@
     <el-table :data="devices" v-loading="loading" border>
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="name" label="设备名称" />
+      <el-table-column v-if="isAdmin()" label="属主" width="140">
+        <template #default="{ row }">
+          <span v-if="row.owner_id != null">{{ ownerName(row.owner_id) }}</span>
+          <span v-else class="owner-none">未绑定</span>
+        </template>
+      </el-table-column>
       <el-table-column label="设备码" min-width="220">
         <template #default="{ row }">
           <div v-if="row.device_key" class="key-cell">
@@ -39,6 +45,7 @@
       <el-table-column label="操作" width="400">
         <template #default="{ row }">
           <el-button size="small" @click="openRename(row)">重命名</el-button>
+          <el-button v-if="isAdmin()" size="small" @click="openRebind(row)">改绑</el-button>
           <el-button size="small" type="primary" plain @click="onRegenerate(row)">重置设备码</el-button>
           <el-button
             size="small"
@@ -57,6 +64,16 @@
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="80px">
         <el-form-item label="设备名称" prop="name">
           <el-input v-model="createForm.name" placeholder="例如：机房 EC20 采集端" maxlength="64" />
+        </el-form-item>
+        <el-form-item v-if="isAdmin()" label="属主">
+          <el-select v-model="createForm.owner_id" style="width: 100%">
+            <el-option
+              v-for="u in userOptions"
+              :key="u.id"
+              :label="u.username"
+              :value="u.id"
+            />
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -102,6 +119,27 @@
         <el-button type="primary" :loading="submitting" @click="onRename">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 改绑属主（仅 admin） -->
+    <el-dialog v-model="rebindVisible" :title="`改绑属主：${rebindTarget?.name || ''}`" width="420px">
+      <el-form label-width="80px">
+        <el-form-item label="属主">
+          <el-select v-model="rebindOwnerId" style="width: 100%">
+            <el-option label="未绑定" :value="null" />
+            <el-option
+              v-for="u in userOptions"
+              :key="u.id"
+              :label="u.username"
+              :value="u.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rebindVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="onRebind">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -109,14 +147,18 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { errMsg } from '../api'
+import { auth, isAdmin } from '../store'
 
 const devices = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 
+// admin 专用：用户列表（id→username 映射、属主下拉选项）
+const userOptions = ref([])
+
 const createVisible = ref(false)
 const createFormRef = ref()
-const createForm = reactive({ name: '' })
+const createForm = reactive({ name: '', owner_id: null })
 const createRules = {
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }]
 }
@@ -139,6 +181,25 @@ const renameTarget = ref(null)
 const renameFormRef = ref()
 const renameForm = reactive({ name: '' })
 
+const rebindVisible = ref(false)
+const rebindTarget = ref(null)
+const rebindOwnerId = ref(null)
+
+function ownerName(id) {
+  const u = userOptions.value.find((x) => x.id === id)
+  return u ? u.username : `#${id}`
+}
+
+// 仅 admin 拉用户列表（普通用户调 /users 会 403）
+async function loadUsers() {
+  try {
+    const { data } = await api.get('/users')
+    userOptions.value = data.items || []
+  } catch (e) {
+    ElMessage.error(errMsg(e, '加载用户列表失败'))
+  }
+}
+
 function formatTime(t) {
   if (!t) return ''
   const d = new Date(t)
@@ -159,6 +220,7 @@ async function loadDevices() {
 
 function openCreate() {
   createForm.name = ''
+  createForm.owner_id = isAdmin() ? auth.user?.id ?? null : null // admin 默认归属自己
   createVisible.value = true
 }
 
@@ -166,7 +228,12 @@ async function onCreate() {
   await createFormRef.value.validate().catch(() => Promise.reject())
   submitting.value = true
   try {
-    const { data } = await api.post('/devices', { name: createForm.name })
+    // owner_id 仅 admin 可指定，普通用户不传（owner 由后端设为本人）
+    const body = { name: createForm.name }
+    if (isAdmin() && createForm.owner_id != null) {
+      body.owner_id = createForm.owner_id
+    }
+    const { data } = await api.post('/devices', body)
     createVisible.value = false
     showKeyDialog('设备创建成功', data.device_key)
     loadDevices()
@@ -213,6 +280,27 @@ async function onRename() {
     loadDevices()
   } catch (e) {
     ElMessage.error(errMsg(e, '重命名失败'))
+  } finally {
+    submitting.value = false
+  }
+}
+
+function openRebind(row) {
+  rebindTarget.value = row
+  rebindOwnerId.value = row.owner_id ?? null
+  rebindVisible.value = true
+}
+
+async function onRebind() {
+  submitting.value = true
+  try {
+    // 显式传 null 表示解绑
+    await api.patch(`/devices/${rebindTarget.value.id}`, { owner_id: rebindOwnerId.value })
+    ElMessage.success('已更新归属')
+    rebindVisible.value = false
+    loadDevices()
+  } catch (e) {
+    ElMessage.error(errMsg(e, '改绑失败'))
   } finally {
     submitting.value = false
   }
@@ -266,7 +354,10 @@ async function onDelete(row) {
   }
 }
 
-onMounted(loadDevices)
+onMounted(() => {
+  loadDevices()
+  if (isAdmin()) loadUsers()
+})
 </script>
 
 <style scoped>
@@ -309,6 +400,10 @@ onMounted(loadDevices)
 }
 .key-expired {
   color: #e6a23c;
+  font-size: 13px;
+}
+.owner-none {
+  color: #909399;
   font-size: 13px;
 }
 </style>
