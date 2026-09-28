@@ -613,8 +613,18 @@ async def delete_sms(sms_id: int, user: dict = Depends(current_user)):
 
 @app.post("/api/v1/sms/send")
 async def send_sms(payload: SmsSendIn, user: dict = Depends(current_user)):
-    device_id = resolve_command_device(user, payload.device_id)
-    row = db.insert_outbox_sms(uuid.uuid4().hex, payload.to, payload.text, device_id)
+    # 先落发件箱再路由：即使设备不在线/需指定设备，失败也要留痕
+    row = db.insert_outbox_sms(uuid.uuid4().hex, payload.to, payload.text, payload.device_id)
+    try:
+        device_id = resolve_command_device(user, payload.device_id)
+    except HTTPException as e:
+        row = db.update_outbox_status(row["client_msg_id"], "failed", e.detail)
+        await hub.broadcast(json.dumps({"type": "sms_sent", "data": row}, ensure_ascii=False),
+                            device_id=payload.device_id)
+        raise
+    if device_id != row.get("device_id"):
+        # 自动路由到的设备写入行（广播过滤用）
+        row["device_id"] = device_id
     try:
         ack = await agent_channel.command(
             device_id, "send_sms", to=payload.to, text=payload.text,
@@ -623,6 +633,7 @@ async def send_sms(payload: SmsSendIn, user: dict = Depends(current_user)):
     except AgentOffline:
         ok, error = False, "agent offline"
     row = db.update_outbox_status(row["client_msg_id"], "sent" if ok else "failed", error)
+    row["device_id"] = device_id
     await hub.broadcast(json.dumps({"type": "sms_sent", "data": row}, ensure_ascii=False),
                         device_id=device_id)
     if not ok:
